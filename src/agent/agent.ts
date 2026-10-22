@@ -185,7 +185,10 @@ export class Agent {
 
   /** What the model gets to see (old, large tool outputs trimmed; see leanView). */
   requestView(): ChatMessage[] {
-    return leanView(this.messages, { turn: this.turn });
+    // Token budget follows the task: hard tasks keep more tool output in view, quick ones less.
+    const c = this.lastProfile?.complexity;
+    const budget = c === 'complex' ? { keepCurrent: 12, maxCurrent: 6000 } : c === 'trivial' || c === 'simple' ? { keepCurrent: 5, maxCurrent: 2500 } : {};
+    return leanView(this.messages, { turn: this.turn, ...budget });
   }
 
   /** Runs one user turn to completion. */
@@ -228,6 +231,10 @@ export class Agent {
           profile = { complexity: 'moderate', type: 'edit', needsReasoning: false, longContext: false, source: 'fixed' };
           debug('agent', 'classify failed', e);
         }
+      }
+      // Plan mode is the architect step: give it a model that reasons, then build with the usual pick.
+      if (this.opts.session.permissionMode === 'plan' && this.depth === 0 && profile.source !== 'fixed') {
+        profile = { ...profile, needsReasoning: true, complexity: profile.complexity === 'trivial' || profile.complexity === 'simple' ? 'moderate' : profile.complexity };
       }
       this.lastProfile = profile;
       this.emit({ type: 'profile', profile });
