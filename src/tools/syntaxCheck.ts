@@ -73,8 +73,8 @@ export async function checkSyntax(file: string, root: string): Promise<string | 
       const where = lines.find((l) => l.includes(file)) ?? '';
       const lineNo = /:(\d+)\s*$/.exec(where)?.[1];
       const err = lines.find((l) => /Error:/.test(l)) ?? lines[lines.length - 1] ?? 'syntax error';
-      // A file using JSX or TypeScript syntax under .js is common in some setups; don't cry wolf.
-      if (/Unexpected token '<'/.test(err)) return null;
+      // JSX in .js files and ES modules in projects without "type": "module" are normal with bundlers.
+      if (/Unexpected token '<'|Cannot use import statement outside a module|Unexpected token 'export'/.test(err)) return null;
       return `${name}${lineNo ? `:${lineNo}` : ''}: ${err.trim()}`;
     }
     if (ext === '.ts' || ext === '.tsx' || ext === '.mts' || ext === '.cts' || ext === '.jsx') {
