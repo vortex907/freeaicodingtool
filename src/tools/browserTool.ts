@@ -1,11 +1,11 @@
 // Browser: lets the agent look at the UI it builds. Text-only models get a written report of what a
 // person would notice; vision models also get the screenshot.
-import { closePage, formatReport, isLocalUrl, openPage, pageFor, resolveTarget, saveScreenshot, type BrowserPage } from '../browser/browser.js';
+import { closePage, formatReport, formatRequests, isLocalUrl, openPage, pageFor, resolveTarget, saveScreenshot, type BrowserPage } from '../browser/browser.js';
 import type { ImageAttachment } from '../providers/types.js';
 import { truncate } from '../util/strings.js';
 import { boolParam, errorResult, numParam, strParam, type PreparedCall, type Tool, type ToolResult } from './types.js';
 
-const ACTIONS = ['open', 'screenshot', 'click', 'type', 'press', 'eval', 'responsive', 'console', 'resize', 'close'] as const;
+const ACTIONS = ['open', 'screenshot', 'click', 'type', 'press', 'eval', 'responsive', 'console', 'network', 'resize', 'close'] as const;
 type Action = (typeof ACTIONS)[number];
 const RESPONSIVE_WIDTHS = [375, 768, 1280];
 
@@ -36,7 +36,7 @@ export const BrowserTool: Tool = {
     '- click / type / press: interact like a user. selector is CSS or text=Label; type puts text in a field (submit=true presses Enter); press sends a key (Enter, Tab, Escape, ArrowDown, ...).\n' +
     '- eval: run JavaScript in the page and get the result (await works).\n' +
     '- responsive: check phone (375), tablet (768) and desktop (1280) widths.\n' +
-    '- console: console messages and failed requests since the last call.\n' +
+    '- console: console messages and failed requests since the last call. network: the page\'s requests (method, status, type, size, time), for debugging API calls.\n' +
     '- resize: change the window size (width, height). close: close the page.\n' +
     'While a page is open, it reloads after you edit UI files and the edit result says what broke.',
   parameters: {
@@ -122,6 +122,10 @@ export const BrowserTool: Tool = {
             const lines = logs.logs.map((l) => `${l.level}: ${l.text}`);
             if (logs.failures.length) lines.push(...logs.failures.map((f) => `failed request: ${f}`));
             const text = lines.length ? lines.slice(-60).join('\n') : 'No console messages or failed requests since the last check.';
+            return { content: text, display: { kind: 'text', text } };
+          }
+          case 'network': {
+            const text = formatRequests(page.requests);
             return { content: text, display: { kind: 'text', text } };
           }
           case 'resize': {

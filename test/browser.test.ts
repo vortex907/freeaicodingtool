@@ -61,6 +61,10 @@ test('open reports console errors, layout problems and returns a screenshot', { 
   assert.match(clicked.content, /Clicked button#go/);
   assert.match((await call({ action: 'eval', script: 'document.title' })).content, /clicked/);
 
+  const net = await call({ action: 'network' });
+  assert.match(net.content, /GET 200 .*index\.html/);
+  assert.match(net.content, /style\.css/);
+
   const phone = await call({ action: 'responsive' });
   assert.match(phone.content, /At 375px \(phone\)/);
   assert.match(phone.content, /At 1280px \(desktop\)/);

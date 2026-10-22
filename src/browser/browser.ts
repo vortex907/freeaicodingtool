@@ -12,6 +12,30 @@ import { PAGE_REPORT_SCRIPT } from './pageScript.js';
 const IDLE_CLOSE_MS = 10 * 60_000;
 export const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 
+export interface NetEntry {
+  method: string;
+  url: string;
+  type: string;
+  start: number;
+  status?: number;
+  mime?: string;
+  bytes?: number;
+  ms?: number;
+  error?: string;
+}
+
+/** The page's requests as a compact list (newest last). */
+export function formatRequests(entries: NetEntry[], limit = 60): string {
+  if (!entries.length) return 'No requests recorded since the page was opened.';
+  const size = (b?: number) => (b === undefined ? '' : b < 1024 ? `${b} B` : `${(b / 1024).toFixed(1)} KB`);
+  const lines = entries.slice(-limit).map((e) => {
+    const what = e.error ? `FAILED ${e.error}` : e.status ?? 'pending';
+    const bits = [e.type || e.mime, size(e.bytes), e.ms !== undefined ? `${e.ms} ms` : ''].filter(Boolean).join(', ');
+    return `${e.method} ${what} ${shortUrl(e.url)}${bits ? ` (${bits})` : ''}`;
+  });
+  return `${entries.length > limit ? `Last ${limit} of ${entries.length} requests:\n` : ''}${lines.join('\n')}`;
+}
+
 export interface LogEntry {
   level: 'error' | 'warning' | 'log' | 'info';
   text: string;
@@ -56,6 +80,9 @@ export class BrowserPage {
   loadMs = 0;
   /** Requests in flight (id to URL), for waiting until the network is quiet. */
   private inflight = new Map<string, string>();
+  /** Recent requests for the network action. */
+  requests: NetEntry[] = [];
+  private byId = new Map<string, NetEntry>();
   private lastNetwork = Date.now();
   private off: () => void;
   closed = false;
@@ -103,25 +130,49 @@ export class BrowserPage {
         if (en.level === 'error' || en.level === 'warning') this.log(en.level, `${en.text}${en.url && !String(en.text).includes(en.url) ? ` (${shortUrl(en.url)})` : ''}`);
         break;
       }
-      case 'Network.requestWillBeSent':
+      case 'Network.requestWillBeSent': {
         this.inflight.set(p.requestId, p.request?.url ?? '');
         this.lastNetwork = Date.now();
+        const entry: NetEntry = { method: p.request?.method ?? 'GET', url: p.request?.url ?? '', type: p.type ?? '', start: p.timestamp ?? 0 };
+        if (!entry.url.startsWith('data:')) {
+          this.byId.set(p.requestId, entry);
+          this.requests.push(entry);
+          if (this.requests.length > 300) this.requests.splice(0, this.requests.length - 300);
+        }
         break;
+      }
       case 'Network.responseReceived': {
         const r = p.response ?? {};
+        const entry = this.byId.get(p.requestId);
+        if (entry) {
+          entry.status = r.status;
+          entry.mime = r.mimeType;
+        }
         if (p.type === 'Document' && r.url && !r.url.startsWith('data:')) this.status = r.status;
         if (r.status >= 400) this.failures.push(`${r.status} ${shortUrl(r.url)}`);
         break;
       }
-      case 'Network.loadingFinished':
+      case 'Network.loadingFinished': {
         this.inflight.delete(p.requestId);
         this.lastNetwork = Date.now();
+        const entry = this.byId.get(p.requestId);
+        if (entry) {
+          entry.bytes = p.encodedDataLength;
+          entry.ms = entry.start && p.timestamp ? Math.round((p.timestamp - entry.start) * 1000) : undefined;
+          this.byId.delete(p.requestId);
+        }
         break;
+      }
       case 'Network.loadingFailed': {
         const url = this.inflight.get(p.requestId) ?? '';
         this.inflight.delete(p.requestId);
         this.lastNetwork = Date.now();
         if (!p.canceled && !String(p.errorText).includes('ERR_ABORTED')) this.failures.push(`${p.errorText} ${shortUrl(url)}`);
+        const entry = this.byId.get(p.requestId);
+        if (entry) {
+          entry.error = p.canceled ? 'canceled' : p.errorText;
+          this.byId.delete(p.requestId);
+        }
         break;
       }
       case 'Page.javascriptDialogOpening':
@@ -160,6 +211,8 @@ export class BrowserPage {
 
   async navigate(url: string, timeoutMs = 25_000): Promise<void> {
     this.takeLogs();
+    this.requests = [];
+    this.byId.clear();
     this.status = undefined;
     this.inflight.clear();
     const start = Date.now();
