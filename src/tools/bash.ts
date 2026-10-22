@@ -143,7 +143,7 @@ interface Invocation {
 export function powershellScript(command: string, cwdFile: string | null): string {
   const saveCwd = cwdFile ? `try { [IO.File]::WriteAllText('${cwdFile.replace(/'/g, "''")}', (Get-Location).ProviderPath) } catch {}\n` : '';
   return (
-    '[Console]::OutputEncoding = [Text.Encoding]::UTF8\n' +
+    'try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}\n' +
     '$OutputEncoding = [Text.Encoding]::UTF8\n' +
     '$global:LASTEXITCODE = $null\n' +
     `${command}\n` +

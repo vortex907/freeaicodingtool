@@ -225,7 +225,8 @@ export function runInTerminal(command: string, dir: string): { ok: boolean; erro
   }
   if (isWindows) {
     powershell(
-      "Start-Process -FilePath cmd.exe -WorkingDirectory $env:FC_DIR -ArgumentList '/k', ('title FreeCode - ' + $env:FC_RUN + ' & ' + $env:FC_RUN)",
+      // A fixed title: putting the command there too would split it at its own "&&".
+      "Start-Process -FilePath cmd.exe -WorkingDirectory $env:FC_DIR -ArgumentList '/k', ('title FreeCode run & ' + $env:FC_RUN)",
       { FC_DIR: dir, FC_RUN: command },
     );
     return { ok: true };
