@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { PermissionMode } from '../config/config.js';
 import { detectShell, osDescription } from '../util/platform.js';
 import { gitInfo } from '../util/git.js';
+import { toolchainSummary } from '../util/toolchain.js';
 import type { MemoryFile } from './memory.js';
 import { DEFAULT_IGNORED_DIRS } from '../tools/listFiles.js';
 
@@ -104,6 +105,7 @@ export async function environmentSection(projectRoot: string, cwd: string): Prom
     projectRoot !== cwd ? `Project root: ${projectRoot}` : '',
     `Platform: ${osDescription()}`,
     `Shell: ${shell.name}`,
+    toolchainSummary() ? `Installed tools: ${toolchainSummary()}` : '',
     shell.kind === 'powershell' ? 'Shell syntax: PowerShell. Chain commands with ";" (Windows PowerShell 5.1 has no "&&"), set variables with $env:NAME = "value", and do not add 2>&1 (output and errors are both captured).' : '',
     shell.kind === 'cmd' ? 'Shell syntax: cmd.exe. Chain commands with "&&", set variables with set NAME=value.' : '',
     `Date: ${new Date().toISOString().slice(0, 10)}`,

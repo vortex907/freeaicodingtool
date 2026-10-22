@@ -19,6 +19,7 @@ import { MODE_CYCLE, modeLabel, parseMode } from '../permissions/permissions.js'
 import { renderTodos, renderToolResult, boxLines } from './render.js';
 import { unifiedDiff } from '../tools/diff.js';
 import { renderMarkdown } from './markdown.js';
+import { COMMIT_PROMPT, WORKFLOWS } from '../agent/workflows.js';
 import { appendMemory } from '../agent/memory.js';
 import { expandCommand } from '../agent/customCommands.js';
 import { displayPath } from '../util/fs.js';
@@ -60,7 +61,6 @@ Keep it concise (about 40-80 lines) and specific to this project; don't pad it w
 
 const REVIEW_PROMPT = `Review the current uncommitted changes in this repository (use git status and git diff, including untracked files). Look for bugs, logic errors, security problems, missing error handling, missing tests and inconsistencies with the surrounding code. Report the findings ordered by severity with file:line references and concrete suggestions. Do not modify any files.`;
 
-const COMMIT_PROMPT = `Create a git commit for the current changes. Run git status and git diff to see what changed, stage the relevant files (not unrelated or generated files, never secrets like .env), and commit with a concise message in the style of the repository's recent commits that explains what and why. Do not push. Show the resulting commit.`;
 
 function modelLine(r: ReplApi, p: { id: string; name: string; paid: boolean; kind: string }, m: { key: string; id: string; quality: number; context: number; toolMode: string }, width: number): SelectOption<string> {
   const health = r.app.health;
@@ -577,9 +577,20 @@ export function builtinCommands(): SlashCommand[] {
     },
     {
       name: 'commit',
-      description: 'Commit the current changes with a good message',
+      description: 'Run the tests, then commit the changes with a good message',
       run: (r) => r.runPrompt(COMMIT_PROMPT, { display: '/commit' }),
     },
+    ...WORKFLOWS.map(
+      (w): SlashCommand => ({
+        name: w.name,
+        description: w.description,
+        args: w.args,
+        run: (r, args) => {
+          if (w.needsArgs && !args.trim()) return r.warn(`Usage: /${w.name} ${w.args ?? ''}`.trim());
+          return r.runPrompt(w.prompt(args.trim()), { display: `/${w.name}${args.trim() ? ` ${args.trim()}` : ''}` });
+        },
+      }),
+    ),
     {
       name: 'doctor',
       description: 'Check the installation and test every configured provider',

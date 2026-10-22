@@ -25,6 +25,7 @@ import { gitRoot } from '../util/git.js';
 import { truncate } from '../util/strings.js';
 import { debug } from '../util/log.js';
 import { VERSION } from '../version.js';
+import { COMMIT_PROMPT, WORKFLOWS, findWorkflow } from '../agent/workflows.js';
 
 export type UIItem =
   | { kind: 'user'; id: string; text: string; ts?: number; queued?: boolean }
@@ -46,7 +47,6 @@ export interface Broadcast {
 
 const INIT_PROMPT = `Analyze this codebase and create an AGENTS.md file in the project root that will help AI coding agents work in this repository. Include: how to build, run, lint and test (including a single test); code style and conventions actually used; a short architecture overview (important directories, entry points); gotchas and project-specific rules. Keep it concise (about 40-80 lines) and specific; if AGENTS.md or CLAUDE.md already exist, improve AGENTS.md instead of duplicating.`;
 const REVIEW_PROMPT = `Review the current uncommitted changes in this repository (git status and git diff, including untracked files). Look for bugs, logic errors, security problems, missing error handling and tests. Report findings by severity with file:line references and concrete suggestions. Do not modify files.`;
-const COMMIT_PROMPT = `Create a git commit for the current changes: check git status and git diff, stage the relevant files (never secrets like .env), and commit with a concise message in the repository's style explaining what and why. Do not push. Show the resulting commit.`;
 
 export const GUI_COMMANDS: { name: string; description: string; args?: string }[] = [
   { name: 'new', description: 'Start a new task (conversation)' },
@@ -54,13 +54,14 @@ export const GUI_COMMANDS: { name: string; description: string; args?: string }[
   { name: 'undo', description: "Revert the file changes of the agent's last turn" },
   { name: 'init', description: 'Create an AGENTS.md describing this project for the agent' },
   { name: 'review', description: 'Review uncommitted changes for bugs' },
-  { name: 'commit', description: 'Commit the current changes with a good message' },
+  { name: 'commit', description: 'Run the tests, then commit the changes with a good message' },
   { name: 'plan', description: 'Switch to plan mode (plan before editing)' },
   { name: 'model', description: 'Pick a model or "auto"', args: '[auto|provider/model]' },
   { name: 'memory', description: 'Save a note to AGENTS.md', args: '<note>' },
   { name: 'reset-limits', description: 'Forget rate-limit cooldowns and retry every model' },
   { name: 'setup', description: 'Open provider setup' },
   { name: 'help', description: 'Show tips and shortcuts' },
+  ...WORKFLOWS.map((w) => ({ name: w.name, description: w.description, args: w.args })),
 ];
 
 let idCounter = 0;
@@ -496,6 +497,12 @@ export class Controller {
       case 'help':
       case 'settings':
         return { ok: true, action: name.toLowerCase() };
+    }
+    const wf = findWorkflow(name);
+    if (wf) {
+      if (wf.needsArgs && !args.trim()) return { ok: false, error: `Usage: /${wf.name} ${wf.args ?? ''}`.trim() };
+      void this.runTurn(wf.prompt(args.trim()), `/${wf.name}${args.trim() ? ` ${args.trim()}` : ''}`);
+      return { ok: true };
     }
     const custom = app.customCommands.find((c) => c.name === name.toLowerCase());
     if (custom) {

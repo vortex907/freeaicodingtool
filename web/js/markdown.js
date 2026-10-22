@@ -2,6 +2,15 @@
 import { escapeHtml, iconHtml } from './dom.js';
 import { highlight } from './highlight.js';
 
+// A code span that names a source file, optionally with :line[:col] (clicking opens it in the editor).
+export const FILE_REF = /^((?:[A-Za-z]:[\\/]|~?[\\/]|\.{1,2}[\\/])?[\w@$()[\]+.-]+(?:[\\/][\w@$()[\]+. -]+)*\.(?:js|jsx|ts|tsx|mjs|cjs|json|jsonc|md|mdx|py|pyw|ipynb|cs|csproj|sln|vb|fs|java|kt|kts|go|rs|c|h|cpp|hpp|cc|hh|cxx|m|mm|swift|rb|php|lua|gd|tscn|html|htm|css|scss|sass|less|vue|svelte|astro|yml|yaml|toml|xml|xaml|sh|bash|ps1|bat|cmd|txt|env|sql|dart|ex|exs|zig|ini|cfg|conf|gradle|properties|lock|dockerfile|tf|proto|graphql|r|jl|scala|clj|erl|hs|ml|nim|v|sv|vhd))(?::(\d+))?(?::\d+)?$/i;
+
+function codeSpan(code) {
+  const m = FILE_REF.exec(code.trim());
+  if (!m) return `<code>${escapeHtml(code)}</code>`;
+  return `<code class="file-link" data-path="${escapeHtml(m[1])}" data-line="${m[2] ?? ''}" title="Open in editor">${escapeHtml(code)}</code>`;
+}
+
 function inline(text) {
   // Protect code spans first.
   const codes = [];
@@ -20,7 +29,7 @@ function inline(text) {
   s = s.replace(/(?<![\w*])\*(?![\s*])(.+?)(?<![\s*])\*(?![\w*])/g, '<em>$1</em>');
   s = s.replace(/(?<![\w_])_(?![\s_])(.+?)(?<![\s_])_(?![\w_])/g, '<em>$1</em>');
   s = s.replace(/~~(?!\s)(.+?)(?<!\s)~~/g, '<del>$1</del>');
-  s = s.replace(/\u0000(\d+)\u0000/g, (_m, i) => `<code>${escapeHtml(codes[Number(i)])}</code>`);
+  s = s.replace(/\u0000(\d+)\u0000/g, (_m, i) => codeSpan(codes[Number(i)]));
   return s;
 }
 

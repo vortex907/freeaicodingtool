@@ -19,6 +19,7 @@ import { type SavedSession, newSessionId, saveSession, sessionTitle } from './se
 import { gitRoot } from './util/git.js';
 import { runHooks } from './agent/hooks.js';
 import { debug } from './util/log.js';
+import { refreshToolchain } from './util/toolchain.js';
 
 export interface AppOptions {
   cwd: string;
@@ -61,6 +62,7 @@ export class App {
   }
 
   async init(ui: AgentUI): Promise<void> {
+    void refreshToolchain();
     this.projectRoot = (await gitRoot(this.cwd)) ?? this.cwd;
     this.reloadConfig();
     this.health = new HealthStore();

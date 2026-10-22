@@ -1,7 +1,7 @@
 // FreeCode app: chat UI driven by the local FreeCode engine.
 import { h, clear, icon, iconHtml, escapeHtml, fmtTokens, fmtDuration, timeAgo, dayGroup, debounce } from './dom.js';
 import { api, connectEvents, token } from './api.js';
-import { renderMarkdown } from './markdown.js';
+import { renderMarkdown, FILE_REF } from './markdown.js';
 import { highlightLine, langFromPath } from './highlight.js';
 import { showOnboarding, openSettings, openFolderPicker } from './settings.js';
 
@@ -511,7 +511,7 @@ function toolBody(item) {
   const body = h('div', { class: 'tool-body' });
   if (!item.result) return body;
   if (item.status === 'error' || item.status === 'denied') {
-    body.append(h('div', { class: 'term err' }, item.result.content));
+    body.append(h('div', { class: 'term err' }, linkify(item.result.content.slice(0, 60000))));
     return body;
   }
   if (d?.kind === 'diff') body.innerHTML = diffTable(d);
@@ -528,7 +528,7 @@ function toolBody(item) {
   else if (d?.kind === 'text') {
     const term = h('div', { class: 'term' });
     if (item.name === 'Bash') term.append(h('span', { class: 'prompt' }, '$ '), (item.input?.command ?? '') + '\n');
-    term.append(d.text);
+    term.append(d.text.length < 60000 ? linkify(d.text) : d.text);
     body.append(term);
   } else {
     let content = item.result.content || '';
@@ -940,6 +940,44 @@ function permissionCard(p) {
     h('div', { class: 'card-feedback' }, fb, sendFb),
   );
 }
+
+// file:line references in command output (stack traces, compiler errors) become clickable.
+const TRACE_REFS = [
+  /File "([^"]+)", line (\d+)/g, // Python
+  /((?:[A-Za-z]:)?[\w@$.\\/-]+\.(?:cs|vb|fs|cpp|cc|cxx|c|h|hpp))\((\d+),\d+\)/g, // MSVC, dotnet
+  /((?:[A-Za-z]:[\\/]|\.{0,2}\/)?[\w@$.-]+(?:[\\/][\w@$.-]+)*\.[A-Za-z]{1,6}):(\d+)(?::\d+)?/g, // path:line[:col]
+];
+
+function linkify(text) {
+  const frag = document.createDocumentFragment();
+  const hits = [];
+  for (const re of TRACE_REFS) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(text)) && hits.length < 200) {
+      if (/^(https?|wss?):/.test(text.slice(Math.max(0, m.index - 8), m.index + 8)) || !FILE_REF.test(`${m[1]}:${m[2]}`)) continue;
+      if (hits.some((h0) => m.index < h0.end && m.index + m[0].length > h0.start)) continue;
+      hits.push({ start: m.index, end: m.index + m[0].length, path: m[1], line: m[2] });
+    }
+  }
+  hits.sort((a, b) => a.start - b.start);
+  let last = 0;
+  for (const hit of hits) {
+    frag.append(text.slice(last, hit.start));
+    frag.append(h('span', { class: 'file-link', 'data-path': hit.path, 'data-line': hit.line, title: 'Open in editor' }, text.slice(hit.start, hit.end)));
+    last = hit.end;
+  }
+  frag.append(text.slice(last));
+  return frag;
+}
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest?.('.file-link');
+  if (!el) return;
+  e.preventDefault();
+  const line = Number(el.dataset.line) || undefined;
+  api.post('/api/launch/file', { path: el.dataset.path, line }).then((r) => !r.ok && toast(r.error || 'Could not open the file', 'err'), (err) => toast(err.message, 'err'));
+});
 
 /** Full-size screenshot over the app (click or Esc closes it). */
 function openShot(src) {

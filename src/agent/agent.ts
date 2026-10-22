@@ -1,4 +1,5 @@
 // The agent loop: send conversation -> stream the answer -> run requested tools -> repeat until done.
+import * as path from 'node:path';
 import type { ChatMessage, ImageAttachment, ToolCall, Usage } from '../providers/types.js';
 import type { PermissionMode, Settings } from '../config/config.js';
 import { updateProjectSettings } from '../config/config.js';
@@ -18,6 +19,7 @@ import { SUMMARY_INSTRUCTIONS, findCutIndex, hardTruncate, leanView, pruneToolOu
 import { runHooks } from './hooks.js';
 import { plainPunctuation } from '../shared/punctuation.js';
 import { previewAfterEdit } from '../tools/browserTool.js';
+import { checkSyntax } from '../tools/syntaxCheck.js';
 import { strParam } from '../tools/types.js';
 import type { McpManager } from '../mcp/manager.js';
 import { debug } from '../util/log.js';
@@ -443,6 +445,13 @@ export class Agent {
     const edits = calls.filter((c) => /^(Write|Edit|MultiEdit)$/.test(c.name) && results.get(c.id) && !results.get(c.id)!.isError);
     if (edits.length && !signal.aborted) {
       const paths = edits.map((c) => strParam(parseToolArguments(c.arguments).value, 'file_path', 'path', 'filePath') ?? '');
+      // A broken edit is cheapest to fix right away, while the model still has the change in mind.
+      const checks = await Promise.all(paths.map((p) => (p ? checkSyntax(path.resolve(this.opts.session.cwd, p), this.opts.projectRoot) : null)));
+      checks.forEach((problem, i) => {
+        if (!problem) return;
+        const r = results.get(edits[i]!.id)!;
+        results.set(edits[i]!.id, { ...r, content: `${r.content}\n\nSyntax check failed after this edit:\n${problem}\nFix this before doing anything else.` });
+      });
       const note = await previewAfterEdit(this.opts.session, paths);
       if (note) {
         const last = edits[edits.length - 1]!;

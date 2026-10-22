@@ -168,6 +168,27 @@ export async function openIn(target: string, dir: string): Promise<{ ok: boolean
   return { ok: true };
 }
 
+/** Opens a file at a line in the first installed code editor (VS Code family or Zed), else with the OS default. */
+export function openFileAt(file: string, line?: number): { ok: boolean; error?: string } {
+  if (!existsSync(file)) return { ok: false, error: `File not found: ${file}` };
+  const where = line && line > 0 ? `${file}:${Math.floor(line)}` : file;
+  const editor = findEditors().find((f) => f.def.id !== 'zed') ?? findEditors()[0];
+  if (editor) {
+    // VS Code, Cursor, Windsurf and VSCodium all take -g file:line; Zed takes file:line.
+    const args = editor.def.id === 'zed' ? [where] : ['-g', where];
+    if (editor.exe) detached(editor.exe, args);
+    else if (isMac && editor.def.mac && !which(editor.def.cli)) detached('open', ['-a', editor.def.mac, '--args', ...args]);
+    else if (isWindows) detached('cmd.exe', ['/d', '/c', `${editor.def.cli} ${args.map((a) => `"${a}"`).join(' ')}`], { windowsVerbatimArguments: true, windowsHide: true });
+    else detached(editor.def.cli, args);
+    return { ok: true };
+  }
+  // No editor: show the file in the file manager. Opening it directly could run a script (.bat, .ps1).
+  if (isWindows) detached('explorer.exe', [`/select,${file}`], { windowsVerbatimArguments: false });
+  else if (isMac) detached('open', ['-R', file]);
+  else detached('xdg-open', [path.dirname(file)]);
+  return { ok: true };
+}
+
 // ------------------------------------------------------------------ run
 
 function readJson(file: string): Record<string, unknown> | null {

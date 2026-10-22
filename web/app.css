@@ -336,6 +336,10 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 .diff tr.del td.code, .diff tr.del td.sign { color: var(--del-fg); }
 .diff tr.gap td { color: var(--faint); background: var(--bg-elev); padding: 2px 10px; font-size: 11.5px; }
 
+/* file:line references that open in the editor */
+.file-link { cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 2px; }
+.file-link:hover { color: var(--accent); text-decoration-color: currentColor; }
+
 /* Browser tool screenshots */
 .shot { display: block; max-width: 100%; max-height: 360px; border-radius: 10px; border: 1px solid var(--border-soft); background: var(--code-bg); cursor: zoom-in; margin: 2px 0 8px; }
 .shot-report summary { cursor: pointer; color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }

@@ -12,7 +12,7 @@ import type { PermissionMode, Settings } from '../config/config.js';
 import { openInBrowser } from '../ui/setup.js';
 import { debug } from '../util/log.js';
 import { VERSION } from '../version.js';
-import { detectRunCommand, openIn, openTargets, runInTerminal } from './launchers.js';
+import { detectRunCommand, openFileAt, openIn, openTargets, runInTerminal } from './launchers.js';
 import { readGlobalConfig, updateGlobalConfig, updateProjectSettings } from '../config/config.js';
 import { clearSkillsCache, loadSkills } from '../skills/skills.js';
 import { DEFAULT_MARKETPLACES, fetchCatalog, installSkill, installedFrom, parseSource, removeSkill } from '../skills/marketplace.js';
@@ -328,6 +328,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           const saved = controller.app.settings.runCommand;
           const detected = detectRunCommand(root);
           return json(res, 200, { targets: openTargets(root), run: saved ? { command: saved, source: 'saved' } : detected ? { command: detected, source: 'detected' } : null });
+        }
+        case 'POST /api/launch/file': {
+          // A file:line reference clicked in the chat: resolve it inside the project and open it.
+          const rel = s('path').replace(/^["']|["']$/g, '');
+          const roots = [controller.app.session.cwd, controller.app.projectRoot];
+          const file = path.isAbsolute(rel) ? rel : roots.map((r) => path.resolve(r, rel)).find((f) => existsSync(f)) ?? path.resolve(controller.app.projectRoot, rel);
+          return json(res, 200, openFileAt(file, typeof body.line === 'number' ? body.line : undefined));
         }
         case 'POST /api/launch/open':
           return json(res, 200, await openIn(s('target'), controller.app.projectRoot));
