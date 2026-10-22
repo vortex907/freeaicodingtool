@@ -5,7 +5,7 @@ import { updateProjectSettings } from '../config/config.js';
 import { type Candidate, type Router, AllModelsUnavailableError } from '../router/router.js';
 import type { TaskProfile } from '../router/classifier.js';
 import { ProviderError } from '../providers/errors.js';
-import { mightContainToolCall, parseToolCallsFromText } from '../providers/textTools.js';
+import { mightContainToolCall, newToolCallId, parseToolCallsFromText } from '../providers/textTools.js';
 import type { PermissionRequest, SessionState, Tool, ToolContext, ToolResult, ToolServices, Todo } from '../tools/types.js';
 import { toolSchema } from '../tools/types.js';
 import { aliasOf, findTool, selectTools } from '../tools/index.js';
@@ -268,6 +268,16 @@ export class Agent {
           const alias = aliasOf(c.name);
           return alias && names.has(alias) ? { ...c, name: alias } : c;
         });
+        // Tool call ids must be unique across the conversation; some providers reuse "call_0" every
+        // step, and ids from different providers can collide after a failover.
+        const usedIds = new Set<string>();
+        for (const m of this.messages) for (const tc of m.toolCalls ?? []) usedIds.add(tc.id);
+        calls = calls.map((c) => {
+          let id = c.id && !usedIds.has(c.id) ? c.id : newToolCallId();
+          while (usedIds.has(id)) id = newToolCallId();
+          usedIds.add(id);
+          return id === c.id ? c : { ...c, id };
+        });
         const assistant: ChatMessage = {
           role: 'assistant',
           content: text,
@@ -397,7 +407,7 @@ export class Agent {
     }
     for (const c of calls) {
       const r = results.get(c.id) ?? { content: 'No result.', isError: true };
-      this.messages.push({ role: 'tool', toolCallId: c.id, toolName: c.name, content: r.content, isError: r.isError, meta: { turn: this.turn } });
+      this.messages.push({ role: 'tool', toolCallId: c.id, toolName: c.name, content: r.content, isError: r.isError, meta: { turn: this.turn, display: compactDisplay(r.display) } });
     }
     if (signal.aborted) throw new ProviderError('aborted', 'Aborted');
     return denied ? 'denied' : 'ok';
@@ -613,7 +623,25 @@ export class Agent {
   }
 }
 
-function safeLabel(tool: Tool, input: Record<string, unknown>, cwd: string, projectRoot: string): string {
+/** Keeps stored diff previews small. */
+function compactDisplay(d: ToolResult['display']): ToolResult['display'] {
+  if (!d) return undefined;
+  if (d.kind === 'diff') {
+    let budget = 400;
+    const hunks = [];
+    for (const h of d.hunks) {
+      if (budget <= 0) break;
+      const lines = h.lines.slice(0, budget);
+      budget -= lines.length;
+      hunks.push({ ...h, lines });
+    }
+    return { ...d, hunks };
+  }
+  if (d.kind === 'text' && d.text.length > 20000) return { ...d, text: d.text.slice(0, 20000) };
+  return d;
+}
+
+export function safeLabel(tool: Tool, input: Record<string, unknown>, cwd: string, projectRoot: string): string {
   try {
     return tool.label(input, { cwd, projectRoot });
   } catch {

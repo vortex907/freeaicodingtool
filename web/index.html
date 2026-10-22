@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FreeCode</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
+    <script>
+      try {
+        const t = localStorage.getItem('fc-theme');
+        if (t) document.documentElement.dataset.theme = t;
+        else if (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.dataset.theme = 'light';
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="app" class="layout">
+      <aside id="sidebar" class="sidebar"></aside>
+      <main id="main" class="main">
+        <header id="topbar" class="topbar"></header>
+        <div id="banner"></div>
+        <section id="chat" class="chat"><div id="chat-inner" class="chat-inner"></div></section>
+        <div id="dock" class="dock">
+          <div id="pending" class="pending-area"></div>
+          <div id="composer-wrap" class="composer-wrap"></div>
+        </div>
+      </main>
+      <aside id="panel" class="panel"></aside>
+    </div>
+    <div id="overlay" class="overlay hidden"></div>
+    <div id="popover-root"></div>
+    <div id="toasts" class="toasts"></div>
+    <div id="boot" class="boot">
+      <div class="boot-logo"></div>
+      <div class="boot-text">Starting FreeCode…</div>
+    </div>
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

@@ -45,11 +45,14 @@ interface CliArgs {
   version: boolean;
   help: boolean;
   noColor: boolean;
+  tui: boolean;
+  noOpen: boolean;
+  port?: number;
   command?: string;
   commandArgs: string[];
 }
 
-const SUBCOMMANDS = new Set(['setup', 'providers', 'models', 'doctor', 'config', 'mcp', 'sessions', 'help', 'version']);
+const SUBCOMMANDS = new Set(['setup', 'providers', 'models', 'doctor', 'config', 'mcp', 'sessions', 'help', 'version', 'app', 'gui', 'web', 'tui']);
 
 function splitList(v: string): string[] {
   return v
@@ -76,6 +79,8 @@ export function parseArgs(argv: string[]): CliArgs {
     version: false,
     help: false,
     noColor: false,
+    tui: false,
+    noOpen: false,
     commandArgs: [],
   };
   const rest: string[] = [];
@@ -184,6 +189,20 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--no-color':
         a.noColor = true;
         break;
+      case '--tui':
+      case '--terminal':
+        a.tui = true;
+        break;
+      case '--app':
+      case '--gui':
+        a.tui = false;
+        break;
+      case '--no-open':
+        a.noOpen = true;
+        break;
+      case '--port':
+        a.port = Number(val());
+        break;
       default:
         if (arg.startsWith('-') && arg.length > 1 && !/^-\d/.test(arg)) throw new Error(`Unknown option: ${arg} (see freecode --help)`);
         rest.push(arg);
@@ -199,7 +218,8 @@ export function parseArgs(argv: string[]): CliArgs {
 const HELP = `${'FreeCode'} ${VERSION} - free AI coding agent for your terminal
 
 Usage:
-  freecode [options] [prompt]        start an interactive session (optionally with a first prompt)
+  freecode [options] [prompt]        open the FreeCode app window (optionally with a first prompt)
+  freecode --tui [prompt]            use the terminal interface instead of the app window
   freecode -p "prompt" [options]     run once and print the answer (non-interactive)
   cat file | freecode -p "explain"   pipe input into the prompt
 
@@ -225,6 +245,9 @@ Options:
   --disallowedTools <rules>   e.g. "Bash(git push:*),WebFetch"
   --max-turns <n>             limit agent steps for this run
   --cwd <dir>                 work in another directory
+  --tui                       terminal interface instead of the app window
+  --port <n>                  port for the app (default 7720)
+  --no-open                   start the app server without opening a window
   --no-router                 rate tasks with the keyword heuristic instead of the router AI
   --allow-paid                allow paid providers in automatic routing
   --setup / --skip-setup      force or skip the provider setup screen
@@ -522,6 +545,51 @@ async function cmdSessions(cwd: string): Promise<number> {
   return 0;
 }
 
+// ------------------------------------------------------------------ app window (GUI)
+
+async function runGui(a: CliArgs): Promise<number> {
+  const { startServer } = await import('./server/server.js');
+  const { launchApp } = await import('./server/launch.js');
+  process.stdout.write(`${theme.brand('✻ FreeCode')} ${c.dim(VERSION)} starting…\n`);
+  const srv = await startServer({
+    cwd: a.cwd,
+    port: a.port,
+    permissionMode: a.permissionMode,
+    model: a.model,
+    allowedTools: a.allowedTools,
+    disallowedTools: a.disallowedTools,
+    trusted: a.trust,
+    overrides: overridesFrom(a),
+    initialPrompt: a.prompt.join(' ').trim() || undefined,
+  });
+  let resolveExit: () => void = () => undefined;
+  const done = new Promise<void>((r) => (resolveExit = r));
+  const launched = a.noOpen ? { mode: 'none' as const } : launchApp(srv.url);
+  if (launched.mode === 'app-window') {
+    process.stdout.write(`${theme.success('✓')} App window opened. ${c.dim('Closing the window quits FreeCode. Press Ctrl+C here to quit too.')}\n`);
+    const started = Date.now();
+    launched.child?.on('exit', () => {
+      if (Date.now() - started < 4000) {
+        process.stdout.write(c.dim('The app window was handed to an already running browser. Close it or press Ctrl+C here to quit.\n'));
+        return;
+      }
+      resolveExit();
+    });
+  } else if (launched.mode === 'browser') {
+    process.stdout.write(`${theme.success('✓')} Opened FreeCode in your browser. ${c.dim('Press Ctrl+C here to quit.')}\n`);
+  } else {
+    process.stdout.write(`Open this address in your browser to use FreeCode:\n\n  ${theme.accent(srv.url)}\n\n${c.dim(`(Over SSH: ssh -L ${srv.port}:127.0.0.1:${srv.port} <host>, then open the address locally.)  Ctrl+C quits.`)}\n`);
+  }
+  if (a.noOpen && launched.mode === 'none') process.stdout.write(c.dim(`App address: ${srv.url}\n`));
+  const onSignal = () => resolveExit();
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  await done;
+  process.stdout.write(c.dim('Shutting down…\n'));
+  await srv.close();
+  return 0;
+}
+
 // ------------------------------------------------------------------ main
 
 export async function main(argv: string[]): Promise<number> {
@@ -549,6 +617,14 @@ export async function main(argv: string[]): Promise<number> {
     return 2;
   }
   switch (a.command) {
+    case 'app':
+    case 'gui':
+    case 'web':
+      return runGui(a);
+    case 'tui':
+      a.tui = true;
+      a.prompt = a.commandArgs;
+      break;
     case 'version':
       console.log(VERSION);
       return 0;
@@ -567,12 +643,11 @@ export async function main(argv: string[]): Promise<number> {
     case 'sessions':
       return cmdSessions(a.cwd);
   }
-  if (a.print || !process.stdin.isTTY || !process.stdout.isTTY) {
-    if (!a.print && !a.prompt.length && process.stdin.isTTY) {
-      console.error('FreeCode needs an interactive terminal (or use -p "prompt" for non-interactive mode).');
-      return 2;
-    }
-    return runPrint(a);
+  if (a.print || (!process.stdin.isTTY && (a.prompt.length || a.tui))) return runPrint(a);
+  if (!a.tui) return runGui(a);
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error('The terminal interface needs an interactive terminal. Use the app (freecode) or -p "prompt".');
+    return 2;
   }
   return runRepl({
     cwd: a.cwd,

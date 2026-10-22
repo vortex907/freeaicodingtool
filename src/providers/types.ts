@@ -27,6 +27,10 @@ export interface MessageMeta {
   turn?: number;
   /** Tool result was pruned during compaction. */
   pruned?: boolean;
+  /** UI rendering data for tool results (diffs, todos...). Never sent to models. */
+  display?: unknown;
+  /** Duration of a tool call in ms (UI only). */
+  durationMs?: number;
 }
 
 export interface ChatMessage {
