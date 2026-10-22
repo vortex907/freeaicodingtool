@@ -349,6 +349,12 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 .cp-rewind { flex: none; color: var(--muted); }
 .cp-rewind.armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 8%, transparent); }
 
+/* voice */
+.mic-btn.recording { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); animation: rec-pulse 1.4s ease-in-out infinite; }
+.mic-btn.busy { opacity: .5; pointer-events: none; }
+@keyframes rec-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 18%, transparent); } }
+.msg-act.speaking { color: var(--accent); }
+
 /* images pasted or dropped into the composer */
 .composer-images { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 12px 0; }
 .composer-images:empty { display: none; }

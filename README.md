@@ -119,6 +119,7 @@ To pin a model, use the model picker or `freecode -m groq/openai/gpt-oss-120b`. 
 ## Using the app
 
 - Type a request and press **Enter**. Use **@** to attach files, **/** for commands, and **!** to run a shell command directly. Paste or drop screenshots and designs into the box; requests with images go to a model that can see them.
+- **Voice:** the mic button records your request and types it in (free Groq Whisper, needs a Groq key). **Read aloud** under an answer speaks it with the system voices.
 - **Modes** (Shift+Tab or the mode pill):
   - **Ask before edits** (default)
   - **Edit automatically**

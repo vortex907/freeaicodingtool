@@ -9,6 +9,9 @@ import { WORKFLOWS, findWorkflow } from '../src/agent/workflows.js';
 import { refreshToolchain, toolchainSummary } from '../src/util/toolchain.js';
 import { which } from '../src/util/platform.js';
 import { FileTracker } from '../src/tools/fileTracker.js';
+import { transcribe, voiceProvider } from '../src/server/voice.js';
+import * as http from 'node:http';
+import type { ProviderRuntime } from '../src/providers/types.js';
 
 const dir = mkdtempSync(path.join(os.tmpdir(), 'fc-extras-'));
 const file = (name: string, text: string) => {
@@ -73,4 +76,25 @@ test('rewinding to a checkpoint restores files from before that request and undo
   await files.rewindTo(1);
   assert.equal(readFileSync(a, 'utf8'), 'v0');
   assert.equal(await files.rewindTo(1), null, 'nothing left to rewind');
+});
+
+test('voice input is sent to a Whisper endpoint as multipart audio', async () => {
+  let seen = '';
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen = `${req.url} ${req.headers.authorization} ${body.includes('whisper-large-v3-turbo') ? 'model-ok' : ''} ${body.includes('filename="speech.webm"') ? 'file-ok' : ''}`;
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text: ' add a dark mode toggle ' }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as { port: number }).port;
+  const groq = { id: 'groq', enabled: true, configured: true, paid: false, apiKeys: ['gsk_test'], baseURL: `http://127.0.0.1:${port}/openai/v1` } as never as ProviderRuntime;
+  assert.equal(voiceProvider([]), undefined);
+  assert.equal((await transcribe([], Buffer.from('x'), 'audio/webm')).ok, false);
+  const r = await transcribe([groq], Buffer.from('fake audio bytes'), 'audio/webm;codecs=opus');
+  srv.close();
+  assert.deepEqual(r, { ok: true, text: 'add a dark mode toggle' });
+  assert.equal(seen, '/openai/v1/audio/transcriptions Bearer gsk_test model-ok file-ok');
 });

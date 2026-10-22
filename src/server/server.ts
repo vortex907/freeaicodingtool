@@ -18,6 +18,7 @@ import { clearSkillsCache, loadSkills } from '../skills/skills.js';
 import { DEFAULT_MARKETPLACES, fetchCatalog, installSkill, installedFrom, parseSource, removeSkill } from '../skills/marketplace.js';
 import { Updater } from '../update/updater.js';
 import { screenshotPath } from '../browser/browser.js';
+import { transcribe, voiceProvider } from './voice.js';
 
 export interface ServerOptions {
   cwd: string;
@@ -61,7 +62,8 @@ async function readBody(req: http.IncomingMessage): Promise<Record<string, unkno
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > 5 * 1024 * 1024) throw new Error('Request too large');
+    // Pasted screenshots and voice recordings arrive as base64 in JSON.
+    if (size > 40 * 1024 * 1024) throw new Error('Request too large');
     chunks.push(chunk as Buffer);
   }
   const raw = Buffer.concat(chunks).toString('utf8');
@@ -209,6 +211,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
             .map((im) => ({ mediaType: im.mediaType, data: im.data }));
           return json(res, 200, await controller.prompt(s('text'), images));
         }
+        case 'POST /api/transcribe': {
+          const audio = Buffer.from(s('audio'), 'base64');
+          if (!audio.length || audio.length > 20_000_000) return json(res, 200, { ok: false, error: 'No audio, or the recording is too long.' });
+          return json(res, 200, await transcribe(controller.app.providers, audio, s('mediaType'), s('language') || undefined));
+        }
+        case 'GET /api/voice':
+          return json(res, 200, { available: !!voiceProvider(controller.app.providers) });
         case 'POST /api/stop':
           controller.stop();
           return json(res, 200, { ok: true });

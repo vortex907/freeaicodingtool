@@ -703,7 +703,9 @@ function renderItemEl(item) {
             setTimeout(() => (copy.lastChild.textContent = 'Copy'), 1200);
           }),
         );
-        wrap.append(h('div', { class: 'msg-actions' }, copy));
+        const listen = h('button', { class: 'msg-act', title: 'Read this answer aloud' }, icon('volume', 'svg-sm'), 'Read aloud');
+        listen.addEventListener('click', () => speak(listen, tidy(item.text)));
+        wrap.append(h('div', { class: 'msg-actions' }, copy, listen));
       }
       if (item.discarded) wrap.append(h('div', { class: 'note warn' }, 'This partial answer was discarded because the model failed; another model continued.'));
       return wrap;
@@ -1340,6 +1342,84 @@ function renderImageStrip() {
   });
 }
 
+// ------------------------------------------------------------ voice: speak a request, hear an answer
+
+let recorder = null;
+
+function insertAtCursor(ta, text) {
+  const pos = ta.selectionStart ?? ta.value.length;
+  const before = ta.value.slice(0, pos);
+  const after = ta.value.slice(pos);
+  const insert = (before && !/\s$/.test(before) ? ' ' : '') + text + (after && !/^\s/.test(after) ? ' ' : '');
+  ta.value = before + insert + after;
+  ta.selectionStart = ta.selectionEnd = pos + insert.length;
+  autoGrow(ta);
+  updateSendBtn();
+  ta.focus();
+}
+
+/** Click to record, click again to stop; the speech is transcribed (Groq Whisper) into the composer. */
+async function toggleVoice(btn) {
+  if (recorder) {
+    recorder.stop();
+    return;
+  }
+  const voice = await api.get('/api/voice').catch(() => ({ available: false }));
+  if (!voice.available) return toast('Voice input needs a free Groq API key: Settings, Providers, Groq.', 'err');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    return toast('Microphone access was blocked.', 'err');
+  }
+  const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find((t) => window.MediaRecorder?.isTypeSupported?.(t)) || '';
+  const mr = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+  const chunks = [];
+  mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  mr.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    recorder = null;
+    btn.classList.remove('recording');
+    btn.title = 'Speak your request';
+    const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+    if (blob.size < 1500) return;
+    btn.classList.add('busy');
+    const data = await new Promise((res) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result).split(',')[1] || '');
+      r.readAsDataURL(blob);
+    });
+    const r = await api.post('/api/transcribe', { audio: data, mediaType: blob.type }).catch((e) => ({ ok: false, error: e.message }));
+    btn.classList.remove('busy');
+    if (!r.ok) return toast(r.error || 'Could not transcribe the recording', 'err');
+    if (r.text) insertAtCursor($('composer-input'), r.text);
+  };
+  recorder = mr;
+  mr.start();
+  btn.classList.add('recording');
+  btn.title = 'Stop recording';
+  setTimeout(() => recorder === mr && mr.stop(), 120_000);
+}
+
+/** Reads an answer aloud with the system voices (code blocks are skipped). */
+function speak(btn, markdown) {
+  if (!window.speechSynthesis) return toast('Speech is not available here', 'err');
+  const wasMe = btn.classList.contains('speaking');
+  speechSynthesis.cancel();
+  document.querySelectorAll('.msg-act.speaking').forEach((b) => b.classList.remove('speaking'));
+  if (wasMe) return;
+  const plain = markdown
+    .replace(/```[\s\S]*?```/g, ' (code) ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^#+\s*/gm, '')
+    .replace(/[*_>|]/g, ' ');
+  const u = new SpeechSynthesisUtterance(plain);
+  u.onend = u.onerror = () => btn.classList.remove('speaking');
+  btn.classList.add('speaking');
+  speechSynthesis.speak(u);
+}
+
 async function send(text) {
   const t = text.trim();
   const images = S.images.map(({ mediaType, data }) => ({ mediaType, data }));
@@ -1491,7 +1571,9 @@ function renderComposer() {
     send(text);
     updateSendBtn();
   });
-  bar.append(attach, modeBtn, modelBtn, h('span', { class: 'grow' }), sendBtn);
+  const mic = h('button', { class: `icon-btn mic-btn ${recorder ? 'recording' : ''}`, title: 'Speak your request' }, icon('mic'));
+  mic.addEventListener('click', () => toggleVoice(mic));
+  bar.append(attach, mic, modeBtn, modelBtn, h('span', { class: 'grow' }), sendBtn);
   updateSendBtn();
 }
 
