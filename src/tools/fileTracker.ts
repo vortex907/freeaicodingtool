@@ -140,6 +140,34 @@ export class FileTracker {
     return { restored, deleted, turn: t.turn };
   }
 
+  /** Requests (turns) that changed files, oldest first. */
+  checkpointList(): { turn: number; files: string[] }[] {
+    return this.turns.map((t) => ({ turn: t.turn, files: t.files.map((f) => f.path) }));
+  }
+
+  /** Puts every file back the way it was before request `turn` (undoing it and every later request). */
+  async rewindTo(turn: number): Promise<{ restored: string[]; deleted: string[]; turns: number[] } | null> {
+    if (!this.turns.some((t) => t.turn >= turn)) return null;
+    const restored = new Set<string>();
+    const deleted = new Set<string>();
+    const turns: number[] = [];
+    while (this.turns.length && this.turns[this.turns.length - 1]!.turn >= turn) {
+      const r = await this.undoLast();
+      if (!r) break;
+      // Newest first: the last restore of a file wins, which is its state before `turn`.
+      for (const f of r.restored) {
+        restored.add(f);
+        deleted.delete(f);
+      }
+      for (const f of r.deleted) {
+        deleted.add(f);
+        restored.delete(f);
+      }
+      turns.push(r.turn);
+    }
+    return { restored: [...restored], deleted: [...deleted], turns };
+  }
+
   /** Files modified during this session with their original content. */
   sessionChanges(): Map<string, string | null> {
     return this.originals;

@@ -138,7 +138,7 @@ export const DesktopTool: Tool = {
       title: { type: 'string', description: 'Part of the window title' },
       process: { type: 'string', description: 'Process name, e.g. CalculatorGUI' },
       pid: { type: 'number', description: 'Process id (child processes are searched too)' },
-      target: { type: 'string', description: 'For click/type: control name or automation id' },
+      target: { type: 'string', description: 'For click/type: control name or automation id, or a kind with an optional number when controls have no names (Edit, Edit 2, Button 3)' },
       text: { type: 'string', description: 'For type: the text to set' },
       keys: { type: 'string', description: 'For keys: SendKeys string, e.g. 12+7{ENTER}' },
     },

@@ -27,6 +27,16 @@ public static class FcWin {
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, StringBuilder l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, string l);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+  // WM_GETTEXT and WM_SETTEXT work across processes for standard controls (GetWindowText does not).
+  public static string Text(IntPtr h) { var sb = new StringBuilder(8192); SendMessage(h, 0x000D, (IntPtr)8192, sb); return sb.ToString(); }
+  public static void SetText(IntPtr h, string t) { SendMessage(h, 0x000C, IntPtr.Zero, t); }
+  public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero); }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public static List<IntPtr> TopWindows() {
     var list = new List<IntPtr>();
@@ -41,6 +51,27 @@ public static class FcWin {
   }
 }
 "@
+}
+
+# Physical pixels everywhere (screenshots, UI Automation rectangles, mouse clicks) at any display scaling.
+[void][FcWin]::SetProcessDPIAware()
+
+# Classic Win32 and .NET Framework WinForms controls often show up as plain "Pane": use the window class.
+function Get-Kind($c) {
+  $type = $c.ControlType.ProgrammaticName.Replace('ControlType.', '')
+  $cls = [string]$c.ClassName
+  if ($type -eq 'Pane' -and $cls) {
+    if ($cls -match 'BUTTON') { return 'Button' }
+    if ($cls -match 'RICHEDIT|EDIT') { return 'Edit' }
+    if ($cls -match 'STATIC') { return 'Text' }
+    if ($cls -match 'COMBOBOX') { return 'ComboBox' }
+    if ($cls -match 'LISTBOX|SysListView32') { return 'List' }
+    if ($cls -match 'SysTreeView32') { return 'Tree' }
+    if ($cls -match 'trackbar') { return 'Slider' }
+    if ($cls -match 'progress') { return 'ProgressBar' }
+    if ($cls -match 'SysTabControl32') { return 'Tab' }
+  }
+  return $type
 }
 
 function Get-Windows {
@@ -89,7 +120,9 @@ function Get-Tree($win) {
       try { $vp = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern); $value = $vp.Current.Value } catch {}
       $toggle = $null
       try { $tp = $e.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern); $toggle = [string]$tp.Current.ToggleState } catch {}
-      $node = [ordered]@{ depth = $d; type = $c.ControlType.ProgrammaticName.Replace('ControlType.', ''); name = $c.Name; id = $c.AutomationId; enabled = $c.IsEnabled; offscreen = $c.IsOffscreen }
+      $kind = Get-Kind $c
+      if ($value -eq $null -and $kind -eq 'Edit' -and $c.NativeWindowHandle) { $value = [FcWin]::Text([IntPtr]$c.NativeWindowHandle) }
+      $node = [ordered]@{ depth = $d; type = $kind; name = $c.Name; id = $c.AutomationId; enabled = $c.IsEnabled; offscreen = $c.IsOffscreen }
       if (-not $r.IsEmpty) { $node.x = [int]($r.X - $win.x); $node.y = [int]($r.Y - $win.y); $node.w = [int]$r.Width; $node.h = [int]$r.Height }
       if ($value -ne $null) { $node.value = [string]$value }
       if ($toggle) { $node.toggle = $toggle }
@@ -111,11 +144,23 @@ function Find-Element($win, $target) {
   $exact = $null; $loose = $null
   foreach ($e in $all) {
     $c = $e.Current
-    if ($c.AutomationId -eq $target -or $c.Name -eq $target) { if (-not $exact) { $exact = $e }; if ($c.ControlType -eq [System.Windows.Automation.ControlType]::Button) { return $e } }
+    if ($c.AutomationId -eq $target -or $c.Name -eq $target) { if (-not $exact) { $exact = $e }; if ((Get-Kind $c) -eq 'Button') { return $e } }
     elseif (-not $loose -and $c.Name -and $c.Name -like ('*' + $target + '*')) { $loose = $e }
   }
   if ($exact) { return $exact }
-  return $loose
+  if ($loose) { return $loose }
+  # "Edit", "Edit 2", "TextBox", "Button#3": the Nth control of that kind (when controls have no names).
+  if ($target -match '^\s*([A-Za-z]+)\s*#?\s*(\d*)\s*$') {
+    $kind = $matches[1]; $n = 1
+    if ($matches[2]) { $n = [int]$matches[2] }
+    $aliases = @{ textbox = 'Edit'; input = 'Edit'; field = 'Edit'; label = 'Text'; checkbox = 'CheckBox'; dropdown = 'ComboBox'; combobox = 'ComboBox'; list = 'List'; slider = 'Slider' }
+    if ($aliases.ContainsKey($kind.ToLower())) { $kind = $aliases[$kind.ToLower()] }
+    $i = 0
+    foreach ($e in $all) {
+      if ((Get-Kind $e.Current) -eq $kind) { $i++; if ($i -eq $n) { return $e } }
+    }
+  }
+  return $null
 }
 
 function Capture($win, $path) {
@@ -163,13 +208,26 @@ try {
           else { $pat.Expand() }
           $done = $true; break
         }
-        if (-not $done) { throw ('The control cannot be clicked through UI Automation') }
-        Start-Sleep -Milliseconds 350
+        $c = $el.Current
+        if (-not $done -and $c.NativeWindowHandle -and (Get-Kind $c) -eq 'Button') {
+          # BM_CLICK, posted so a click handler that opens a dialog can't block this script.
+          [void][FcWin]::PostMessage([IntPtr]$c.NativeWindowHandle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero); $done = $true
+        }
+        if (-not $done) {
+          $r = $c.BoundingRectangle
+          if ($r.IsEmpty) { throw ('The control cannot be clicked: it has no position on screen') }
+          [void][FcWin]::SetForegroundWindow([IntPtr]$win.hwnd)
+          Start-Sleep -Milliseconds 150
+          [FcWin]::Click([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2))
+        }
+        Start-Sleep -Milliseconds 400
       }
       elseif ($a.action -eq 'type') {
         $vp = $null
         try { $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern) } catch {}
+        $c = $el.Current
         if ($vp -and -not $vp.Current.IsReadOnly) { $vp.SetValue([string]$a.text) }
+        elseif ($c.NativeWindowHandle -and (Get-Kind $c) -eq 'Edit') { [FcWin]::SetText([IntPtr]$c.NativeWindowHandle, [string]$a.text) }
         else { $el.SetFocus(); [System.Windows.Forms.SendKeys]::SendWait([string]$a.text) }
         Start-Sleep -Milliseconds 250
       }

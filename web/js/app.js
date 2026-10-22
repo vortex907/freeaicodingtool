@@ -141,12 +141,46 @@ async function loadSessions() {
 }
 
 async function loadChanges() {
-  try {
-    S.changes = await api.get('/api/changes');
-  } catch {
-    S.changes = [];
-  }
+  const [changes, checkpoints] = await Promise.all([api.get('/api/changes').catch(() => []), api.get('/api/checkpoints').catch(() => [])]);
+  S.changes = changes;
+  S.checkpoints = checkpoints;
   renderPanel();
+}
+
+/** "Rewind to before this request" list under the changed files. Two clicks, so a stray click can't revert work. */
+function checkpointList() {
+  const cps = S.checkpoints || [];
+  if (!cps.length) return null;
+  const list = h('div', { class: 'cp-list' }, h('div', { class: 'panel-section-title' }, 'Checkpoints'));
+  for (const cp of cps) {
+    const btn = h('button', { class: 'btn btn-sm btn-ghost cp-rewind', title: 'Put the files back the way they were before this request (later requests are undone too)' }, icon('undo', 'svg-sm'), 'Rewind');
+    let armed = null;
+    btn.addEventListener('click', async () => {
+      if (!armed) {
+        btn.lastChild.textContent = 'Click again to rewind';
+        btn.classList.add('armed');
+        armed = setTimeout(() => {
+          armed = null;
+          btn.lastChild.textContent = 'Rewind';
+          btn.classList.remove('armed');
+        }, 3500);
+        return;
+      }
+      clearTimeout(armed);
+      const r = await api.post('/api/rewind', { turn: cp.turn }).catch((e) => ({ ok: false, error: e.message }));
+      if (!r.ok) toast(r.error || 'Could not rewind', 'err');
+      loadChanges();
+    });
+    list.append(
+      h(
+        'div',
+        { class: 'cp' },
+        h('div', { class: 'cp-text' }, h('div', { class: 'cp-prompt', title: cp.prompt }, cp.prompt), h('div', { class: 'cp-files', title: cp.files.join('\n') }, `${cp.files.length} file${cp.files.length === 1 ? '' : 's'}: ${cp.files.slice(0, 3).join(', ')}${cp.files.length > 3 ? ', ...' : ''}`)),
+        btn,
+      ),
+    );
+  }
+  return list;
 }
 
 // ---------------------------------------------------------------- live events
@@ -1752,6 +1786,8 @@ function renderPanel() {
         body.append(box);
       }
     }
+    const cps = checkpointList();
+    if (cps) body.append(cps);
   } else if (S.ui.panel === 'tasks') {
     if (!todos.length) body.append(h('div', { class: 'panel-empty' }, icon('listChecks', 'svg-lg'), h('div', { style: { marginTop: '8px' } }, 'When FreeCode works on a multi-step task, its plan and progress appear here.')));
     else body.append(todoList(todos));

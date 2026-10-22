@@ -681,6 +681,33 @@ export class Controller {
     return mentionCompletions(q, list).map((i) => ({ path: i.label, dir: i.label.endsWith('/') }));
   }
 
+  /** Requests that changed files, newest first, with the request text (for the rewind list). */
+  checkpoints(): { turn: number; prompt: string; files: string[] }[] {
+    const prompts = new Map<number, string>();
+    for (const m of this.app.agent.messages) {
+      const turn = m.meta?.turn;
+      if (m.role !== 'user' || m.meta?.synthetic || turn === undefined || prompts.has(turn)) continue;
+      const text = m.content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').replace(/<hook-context>[\s\S]*?<\/hook-context>/g, '').trim();
+      prompts.set(turn, text.split('\n')[0]!.slice(0, 140));
+    }
+    return this.app.files
+      .checkpointList()
+      .map((c) => ({ turn: c.turn, prompt: prompts.get(c.turn) || `Request ${c.turn}`, files: c.files.map((f) => path.relative(this.app.projectRoot, f) || f) }))
+      .reverse();
+  }
+
+  async rewind(turn: number): Promise<{ ok: boolean; error?: string }> {
+    if (this.busy) return { ok: false, error: 'Stop the running task first.' };
+    const res = await this.app.files.rewindTo(turn);
+    if (!res) return { ok: false, error: 'Nothing to rewind.' };
+    const rel = (f: string) => path.relative(this.app.projectRoot, f) || f;
+    const files = [...res.restored.map((f) => `restored ${rel(f)}`), ...res.deleted.map((f) => `deleted ${rel(f)}`)];
+    this.app.agent.addContext(`[The user rewound the project files to how they were before request ${turn}: ${files.join('; ') || 'no files changed'}. Re-read files before editing them again.]`, 'command');
+    this.toast('info', `Rewound ${res.turns.length} request${res.turns.length === 1 ? '' : 's'}: ${files.length} file${files.length === 1 ? '' : 's'} put back`);
+    this.broadcast({ type: 'changes' });
+    return { ok: true };
+  }
+
   async changes(): Promise<unknown[]> {
     const out: unknown[] = [];
     for (const [file, before] of this.app.files.sessionChanges()) {

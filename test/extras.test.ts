@@ -1,13 +1,14 @@
 // Syntax checks after edits, workflow commands and the toolchain summary.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { checkSyntax } from '../src/tools/syntaxCheck.js';
 import { WORKFLOWS, findWorkflow } from '../src/agent/workflows.js';
 import { refreshToolchain, toolchainSummary } from '../src/util/toolchain.js';
 import { which } from '../src/util/platform.js';
+import { FileTracker } from '../src/tools/fileTracker.js';
 
 const dir = mkdtempSync(path.join(os.tmpdir(), 'fc-extras-'));
 const file = (name: string, text: string) => {
@@ -49,4 +50,27 @@ test('workflow commands have prompts without em dashes and require arguments whe
 test('toolchain summary lists node with a version', async () => {
   await refreshToolchain();
   assert.match(toolchainSummary(), /\bnode \d+\.\d+/);
+});
+
+test('rewinding to a checkpoint restores files from before that request and undoes later ones', async () => {
+  const files = new FileTracker(true);
+  const a = file('a.txt', 'v0');
+  const b = path.join(dir, 'b.txt');
+  files.beginTurn(1);
+  await files.snapshot(a);
+  writeFileSync(a, 'v1');
+  files.beginTurn(2);
+  await files.snapshot(a);
+  writeFileSync(a, 'v2');
+  await files.snapshot(b);
+  writeFileSync(b, 'new');
+  files.beginTurn(3);
+  assert.deepEqual(files.checkpointList().map((c) => c.turn), [1, 2]);
+  const r = await files.rewindTo(2);
+  assert.deepEqual(r?.turns, [2]);
+  assert.equal(readFileSync(a, 'utf8'), 'v1');
+  assert.ok(!existsSync(b));
+  await files.rewindTo(1);
+  assert.equal(readFileSync(a, 'utf8'), 'v0');
+  assert.equal(await files.rewindTo(1), null, 'nothing left to rewind');
 });

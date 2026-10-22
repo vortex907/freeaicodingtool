@@ -248,6 +248,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           return json(res, 200, await controller.files(url.searchParams.get('q') ?? ''));
         case 'GET /api/changes':
           return json(res, 200, await controller.changes());
+        case 'GET /api/checkpoints':
+          return json(res, 200, controller.checkpoints());
+        case 'POST /api/rewind':
+          return json(res, 200, await controller.rewind(typeof body.turn === 'number' ? body.turn : -1));
         case 'GET /api/fs':
           return json(res, 200, await controller.listDir(url.searchParams.get('path') ?? undefined));
         case 'POST /api/project': {
