@@ -8,6 +8,8 @@ import { parseToolCallsFromText } from '../src/providers/textTools.js';
 import { classifyHttpError } from '../src/providers/errors.js';
 import { gitBashPath, powershellScript } from '../src/tools/bash.js';
 import { shortError } from '../src/router/health.js';
+import { plainPunctuation } from '../src/shared/punctuation.js';
+import { isUiWork } from '../src/agent/agent.js';
 import type { ChatMessage, ModelInfo, ProviderQuirks } from '../src/providers/types.js';
 
 const model = (id: string) => ({ id, key: `p/${id}` }) as unknown as ModelInfo;
@@ -206,4 +208,35 @@ test('re-reading an unchanged file within a task returns a short note', async ()
   assert.match(await read(), /three/, 'a changed file is read again');
   files.beginTurn(2);
   assert.match(await read(), /three/, 'a new task reads again');
+});
+
+test('em and en dashes in replies become plain punctuation, code stays as it is', () => {
+  const cases: [string, string][] = [
+    ['The router — which picks models — is fast.', 'The router, which picks models, is fast.'],
+    ['- **Run** — starts the project', '- **Run**: starts the project'],
+    ['1. Settings — opens the settings page', '1. Settings: opens the settings page'],
+    ['It failed — the key was wrong.', 'It failed: the key was wrong.'],
+    ['It works on Windows — and on macOS too.', 'It works on Windows, and on macOS too.'],
+    ['Ask 1–4 questions (2020—2024).', 'Ask 1-4 questions (2020-2024).'],
+    ['## Step 1 — Install', '## Step 1: Install'],
+    ['Here is what changed —', 'Here is what changed:'],
+    ['Use `a — b` in code — or not.', 'Use `a — b` in code, or not.'],
+    ['— Linus', '- Linus'],
+    ['- The router — which picks models — is fast.', '- The router, which picks models, is fast.'],
+    ['- **Run** — starts the app — or the tests.', '- **Run**: starts the app, or the tests.'],
+    ["It's free – no key needed", "It's free: no key needed"],
+    ['fast—really fast', 'fast: really fast'],
+  ];
+  for (const [input, want] of cases) assert.equal(plainPunctuation(input), want, input);
+  const fenced = 'Before — after\n```js\nconst a = 1; // x — y\n```\nDone — ok';
+  assert.equal(plainPunctuation(fenced), 'Before: after\n```js\nconst a = 1; // x — y\n```\nDone: ok');
+  assert.equal(plainPunctuation('no dashes here - fine'), 'no dashes here - fine');
+});
+
+test('UI requests get the design reminder, other work does not', () => {
+  assert.ok(isUiWork('make the calculator look good'));
+  assert.ok(isUiWork('build a landing page with Tailwind'));
+  assert.ok(isUiWork('make a WinForms app for notes'));
+  assert.ok(!isUiWork('fix the failing unit tests in the parser'));
+  assert.ok(!isUiWork('why does the API return 500?'));
 });

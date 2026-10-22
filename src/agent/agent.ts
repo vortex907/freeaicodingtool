@@ -16,6 +16,7 @@ import { parseToolArguments } from '../util/jsonRepair.js';
 import { estimateRequestTokens } from '../util/tokens.js';
 import { SUMMARY_INSTRUCTIONS, findCutIndex, hardTruncate, leanView, pruneToolOutputs, summaryMessage, transcript } from './compaction.js';
 import { runHooks } from './hooks.js';
+import { plainPunctuation } from '../shared/punctuation.js';
 import type { McpManager } from '../mcp/manager.js';
 import { debug } from '../util/log.js';
 import { truncate } from '../util/strings.js';
@@ -101,6 +102,15 @@ export function asksAboutCurrentInfo(text: string): boolean {
   const question = /\?\s*$/.test(t) || /^(what|which|when|who|is|are|does|do|did|has|have|how (much|many)|check|look up|find out|search|tell me|show me)\b/i.test(t);
   const timely = /\b(latest|newest|current(ly)?|recent(ly)?|today|tonight|yesterday|this (week|month|year)|right now|now|update[sd]?|patch(es| notes)?|release[sd]?|version|changelog|news|price[sd]?|cost|weather|score[sd]?|standings|still (supported|maintained|alive)|deprecated|20[2-3]\d)\b/i.test(t);
   return question && timely;
+}
+
+/** Hidden note for UI work: weak models skip the design rules unless reminded at the end of the request. */
+export const DESIGN_REMINDER =
+  '<system-reminder>This involves a user interface. Follow the Design taste rules: one accent color on neutral tones, a small type scale, spacing in multiples of 4 or 8 px, visible hover and focus states, real copy, SVG icons (no emoji), no generic gradient look. Before you finish, check the result against these rules and fix what falls short.</system-reminder>';
+
+export function isUiWork(text: string): boolean {
+  if (text.length > 4000) return false;
+  return /\b(ui|ux|gui|interface|design|redesign|layout|styl(e|es|ing)|css|tailwind|html|website|web ?site|web ?page|web ?app|landing|dashboard|front[- ]?end|component|button|navbar|sidebar|modal|theme|dark mode|winforms|wpf|tkinter|pyqt|electron|react|vue|svelte|calculator|game)\b/i.test(text) || /\blook(s|ing)? (good|better|nice|modern|clean|bad|ugly|off)\b/i.test(text);
 }
 
 export class Agent {
@@ -197,6 +207,7 @@ export class Agent {
         }
         if (hook.context.length) content += `\n\n<hook-context>\n${hook.context.join('\n')}\n</hook-context>`;
         if (asksAboutCurrentInfo(input)) content += `\n\n${LIVE_INFO_REMINDER}`;
+        if (isUiWork(input)) content += `\n\n${DESIGN_REMINDER}`;
       }
       this.messages.push({ role: 'user', content, images: opts.images, meta: { turn: this.turn, ts: Date.now() } });
 
@@ -298,6 +309,7 @@ export class Agent {
           usedIds.add(id);
           return id === c.id ? c : { ...c, id };
         });
+        if (settings.plainPunctuation !== false) text = plainPunctuation(text);
         const assistant: ChatMessage = {
           role: 'assistant',
           content: text,

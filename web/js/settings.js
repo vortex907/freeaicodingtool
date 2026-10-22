@@ -396,6 +396,7 @@ export function openSettings(ctx, tab = 'providers') {
         field('Command timeout (ms)', 'Default time limit for shell commands.', num('bashTimeoutMs', s.bashTimeoutMs)),
         field('Show model reasoning', 'Show "thinking" sections from reasoning models.', toggle(s.showReasoning, upd('showReasoning'))),
         field('Save conversations', 'Keep history so you can resume tasks later.', toggle(s.saveSessions, upd('saveSessions'))),
+        field('No em dashes in replies', 'Rewrite em and en dashes in answers as commas, colons or hyphens. Code is left as it is.', toggle(s.plainPunctuation !== false, upd('plainPunctuation'))),
         field('Update automatically', 'Download new versions from GitHub in the background and install them when you restart.', toggle(s.autoUpdate !== false, upd('autoUpdate'))),
         field('Web search engine', 'DuckDuckGo works without a key; Brave/Tavily give better results with a free key.', ws),
         field('Brave Search API key', null, brave),

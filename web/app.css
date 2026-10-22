@@ -127,10 +127,16 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: content-box; border: 3px solid transparent; }
 ::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
 
 /* ---------------------------------------------------------------- layout */
 .layout { display: grid; grid-template-columns: var(--sidebar-w) 1fr auto; height: 100vh; }
 .layout.no-sidebar { grid-template-columns: 0 1fr auto; }
+/* Fixed columns: on narrow windows the sidebar and panel float above the page, and auto-placement
+   would otherwise drop the main column into the 0-width sidebar track. */
+.layout > .sidebar { grid-column: 1; grid-row: 1; }
+.layout > .main { grid-column: 2; grid-row: 1; }
+.layout > .panel { grid-column: 3; grid-row: 1; }
 .layout.no-sidebar .sidebar { display: none; }
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100vh; position: relative; }
 
@@ -310,13 +316,19 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* diff */
-.diff { border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden; background: var(--code-bg); font-family: var(--mono); font-size: 12.2px; line-height: 1.55; }
-.diff-file { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border-soft); font-size: 12px; color: var(--text-2); background: var(--bg-elev); }
+.diff { border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden; background: var(--code-bg); font-family: var(--mono); font-size: 12.2px; line-height: 1.55; tab-size: 4; }
+.diff-file { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border-soft); font-size: 12px; color: var(--text-2); background: var(--bg-elev); min-height: 34px; }
+.diff-file .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diff-file .add { color: var(--accent); } .diff-file .del { color: var(--danger); }
-.diff-scroll { overflow-x: auto; max-height: 460px; overflow-y: auto; }
+.diff-file .diff-expand { margin-left: auto; color: var(--muted); font-family: var(--font); }
+.diff-file .diff-expand:hover { color: var(--text); }
+.diff-scroll { overflow: auto; max-height: 460px; overscroll-behavior: contain; }
 .diff table { border-collapse: collapse; width: 100%; }
-.diff td { padding: 0 10px; white-space: pre; vertical-align: top; }
-.diff td.ln { width: 1%; color: var(--faint); text-align: right; user-select: none; padding: 0 8px; opacity: .8; }
+/* Long lines wrap instead of scrolling sideways. */
+.diff td { padding: 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; vertical-align: top; }
+.diff td.ln, .diff td.sign { white-space: pre; overflow-wrap: normal; }
+.diff tr.more td { color: var(--muted); background: var(--bg-elev); padding: 6px 12px; font-family: var(--font); font-size: 12.5px; border-top: 1px solid var(--border-soft); }
+.diff td.ln { width: 1%; color: var(--faint); text-align: right; user-select: none; padding: 0 8px; }
 .diff td.sign { width: 1%; user-select: none; padding: 0 4px 0 2px; color: var(--faint); }
 .diff tr.add { background: var(--add-bg); }
 .diff tr.add td.code, .diff tr.add td.sign { color: var(--add-fg); }
@@ -344,12 +356,23 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 
 /* ---------------------------------------------------------------- dock: pending cards + composer */
 .dock { flex: none; padding: 0 20px 16px; }
-.pending-area { max-width: var(--chat-max); margin: 0 auto 10px; display: flex; flex-direction: column; gap: 10px; max-height: 62vh; overflow-y: auto; }
+/* Cards never grow past the window: header, actions and the feedback row stay visible and only the
+   preview inside (a diff, a plan) scrolls. */
+.pending-area { --card-max: min(64vh, calc(100vh - 250px)); max-width: var(--chat-max); margin: 0 auto 10px; display: flex; flex-direction: column; gap: 10px; max-height: var(--card-max); overflow-y: auto; overscroll-behavior: contain; }
 .pending-area:empty { display: none; }
-.card { border: 1px solid var(--border); background: var(--bg-elev); border-radius: 14px; box-shadow: var(--shadow-sm); overflow: hidden; animation: rise .18s var(--ease); }
+.card { border: 1px solid var(--border); background: var(--bg-elev); border-radius: 14px; box-shadow: var(--shadow-sm); overflow: hidden; animation: rise .18s var(--ease); display: flex; flex-direction: column; flex: none; max-height: var(--card-max, 64vh); min-height: 0; }
+.card > * { flex: none; }
+.card > .card-body { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+.card-body.diff-body { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+.card-body.diff-body > * { flex: none; }
+.card-body.diff-body > .diff { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.card-body.diff-body .diff-file { flex: none; }
+.card-body.diff-body .diff-scroll { flex: 0 1 auto; min-height: 72px; max-height: none; }
 @keyframes rise { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
 .card-head { display: flex; align-items: center; gap: 9px; padding: 11px 14px 4px; font-weight: 600; font-size: 14px; }
 .card-head .badge { margin-left: auto; }
+.card-head .kbd-hint { font-weight: 400; }
+.card-head .badge + .kbd-hint { margin-left: 10px; }
 .card-body { padding: 6px 14px 4px; }
 .card-body .desc { color: var(--muted); font-size: 13px; margin: 6px 0 2px; }
 .card-body .danger-line { color: var(--danger); font-size: 13px; margin-top: 8px; display: flex; gap: 6px; align-items: center; }
@@ -453,6 +476,20 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 .modal-head .sub { color: var(--muted); font-size: 13px; }
 .modal-body { flex: 1; overflow-y: auto; padding: 18px 20px 24px; }
 .modal-foot { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border-soft); }
+/* full-size review of a proposed edit */
+.modal.review { flex-direction: column; width: min(1200px, 96vw); height: 92vh; }
+.modal.review .modal-head { flex: none; }
+.modal.review .modal-head > svg { color: var(--muted); flex: none; }
+.review-title { flex: 1; min-width: 0; }
+.review-title h2 { font-size: 15.5px; }
+.review-title .sub { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.review-stats { display: flex; gap: 10px; font-family: var(--mono); font-size: 12.5px; font-weight: 600; flex: none; }
+.review-stats .add { color: var(--accent); }
+.review-stats .del { color: var(--danger); }
+.modal.review .modal-body { padding: 0; overscroll-behavior: contain; }
+.modal.review .diff { border: 0; border-radius: 0; min-height: 100%; }
+.modal.review .diff-scroll { max-height: none; overflow: visible; }
+.modal.review .modal-foot { flex: none; flex-wrap: wrap; }
 
 /* provider cards */
 .prov-section { margin: 4px 0 22px; }

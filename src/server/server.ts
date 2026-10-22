@@ -125,6 +125,18 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       }
       const url = new URL(req.url ?? '/', `http://${host}`);
       const p = url.pathname;
+      const shared = /^\/shared\/([a-z]+\.js)$/.exec(p);
+      if (shared) {
+        // Browser-safe modules compiled from src/shared (the same code the agent uses).
+        try {
+          const data = await fsp.readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'shared', shared[1]!));
+          res.writeHead(200, { 'content-type': MIME['.js']!, 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' });
+          res.end(data);
+        } catch {
+          res.writeHead(404).end('Not found');
+        }
+        return;
+      }
       if (!p.startsWith('/api/')) {
         // Static files
         let rel = p === '/' ? 'index.html' : decodeURIComponent(p.slice(1));

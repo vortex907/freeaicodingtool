@@ -243,6 +243,7 @@ export class Controller {
         permissions: { allow: s.permissions.allow, deny: s.permissions.deny, defaultMode: s.permissions.mode },
         saveSessions: s.saveSessions,
         autoUpdate: s.autoUpdate !== false,
+        plainPunctuation: s.plainPunctuation !== false,
       },
       mcp: [...app.mcp.entries].map((e) => {
         const cl = app.mcp.clients.get(e.name);
@@ -637,7 +638,7 @@ export class Controller {
   // ------------------------------------------------------------------ settings
 
   updateSettings(patch: Record<string, unknown>): void {
-    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate'];
+    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate', 'plainPunctuation'];
     updateGlobalConfig((g) => {
       for (const [k, v] of Object.entries(patch)) if (allowed.includes(k)) setByPath(g as Record<string, unknown>, k, v);
     });

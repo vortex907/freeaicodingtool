@@ -5,7 +5,12 @@ import { renderMarkdown } from './markdown.js';
 import { highlightLine, langFromPath } from './highlight.js';
 import { showOnboarding, openSettings, openFolderPicker } from './settings.js';
 
+// Shared with the engine (src/shared). Falls back to showing text unchanged if it can't load.
+const { plainPunctuation } = await import('/shared/punctuation.js').catch(() => ({ plainPunctuation: (t) => t }));
+
 const $ = (id) => document.getElementById(id);
+/** Model-written text as the user sees it (em dashes rewritten unless turned off in Settings). */
+const tidy = (t) => (t && S.state?.settings?.plainPunctuation !== false ? plainPunctuation(t) : t);
 
 const S = {
   state: null,
@@ -433,19 +438,31 @@ function splitLabel(label) {
   return { name: label, arg: '' };
 }
 
+function diffLineCount(display) {
+  return (display.hunks || []).reduce((n, hk) => n + hk.lines.length, 0);
+}
+
+/** opts.maxLines renders only the first lines (the rest is summarised in a last row). */
 function diffTable(display, opts = {}) {
   const rows = [];
   const hunks = display.hunks || [];
   const lang = langFromPath(display.path);
-  hunks.forEach((hk, i) => {
+  const max = opts.maxLines ?? Infinity;
+  let shown = 0;
+  for (const [i, hk] of hunks.entries()) {
+    if (shown >= max) break;
     if (i > 0) rows.push(`<tr class="gap"><td colspan="4">⋯</td></tr>`);
     for (const l of hk.lines) {
+      if (shown >= max) break;
+      shown++;
       const cls = l.type === 'add' ? 'add' : l.type === 'del' ? 'del' : '';
       const sign = l.type === 'add' ? '+' : l.type === 'del' ? '−' : ' ';
       const code = l.type === 'ctx' ? highlightLine(l.text, lang) : escapeHtml(l.text);
       rows.push(`<tr class="${cls}"><td class="ln">${l.oldNo ?? ''}</td><td class="ln">${l.newNo ?? ''}</td><td class="sign">${sign}</td><td class="code">${code || ' '}</td></tr>`);
     }
-  });
+  }
+  const rest = diffLineCount(display) - shown;
+  if (rest > 0) rows.push(`<tr class="more"><td colspan="4">${rest} more line${rest === 1 ? '' : 's'} not shown here</td></tr>`);
   const head = opts.noHead
     ? ''
     : `<div class="diff-file">${iconHtml(display.created ? 'filePlus' : 'pencil', 'svg-sm')}<span class="mono">${escapeHtml(display.path)}</span><span class="add">+${display.added}</span><span class="del">−${display.removed}</span></div>`;
@@ -545,9 +562,9 @@ function thinkingBlock(item) {
   const live = item.streaming && !item.text;
   const secs = item.thoughtMs && item.thoughtMs >= 1000 ? fmtDuration(item.thoughtMs) : null;
   const open = live ? !S.ui.closed.has(item.id) : S.ui.open.has(item.id);
-  const text = live && item.reasoning.length > 6000 ? `…${item.reasoning.slice(-6000)}` : item.reasoning;
+  const text = tidy(live && item.reasoning.length > 6000 ? `…${item.reasoning.slice(-6000)}` : item.reasoning);
   const label = live ? h('span', { class: 'w-text' }, 'Thinking') : h('span', null, secs ? `Thought for ${secs}` : 'Thought');
-  const preview = !live && !open ? h('span', { class: 't-preview' }, firstThought(item.reasoning)) : null;
+  const preview = !live && !open ? h('span', { class: 't-preview' }, firstThought(tidy(item.reasoning))) : null;
   const timer = live && item.thinkingSince ? h('span', { class: 't-timer', 'data-since': String(item.thinkingSince) }, fmtDuration(Date.now() - item.thinkingSince)) : null;
   const body = h('div', { class: `t-body ${live ? 'live' : ''}` }, text);
   const det = h('details', { class: `thinking ${live ? 'live' : ''}`, ...(open ? { open: '' } : {}) }, h('summary', null, icon('sparkle', 'svg-sm'), label, timer, preview, icon('chevronDown', 'svg-sm chev')), body);
@@ -629,11 +646,11 @@ function renderItemEl(item) {
     case 'assistant': {
       const wrap = h('div', { class: `msg-assistant ${item.discarded ? 'discarded' : ''}`, 'data-id': item.id });
       if (item.reasoning && S.state?.settings?.showReasoning !== false) wrap.append(thinkingBlock(item));
-      if (item.text) wrap.append(h('div', { class: 'md', html: renderMarkdown(item.text) }));
+      if (item.text) wrap.append(h('div', { class: 'md', html: renderMarkdown(tidy(item.text)) }));
       if (item.text && !item.streaming && !item.discarded && item.final) {
         const copy = h('button', { class: 'msg-act', title: 'Copy this answer (Markdown)' }, icon('copy', 'svg-sm'), 'Copy');
         copy.addEventListener('click', () =>
-          navigator.clipboard?.writeText(item.text).then(() => {
+          navigator.clipboard?.writeText(tidy(item.text)).then(() => {
             copy.lastChild.textContent = 'Copied';
             setTimeout(() => (copy.lastChild.textContent = 'Copy'), 1200);
           }),
@@ -737,7 +754,7 @@ function updateWorking(el) {
   else if (a?.text) verb = 'Writing…';
   const model = S.state?.model?.current;
   el.append(h('span', { class: 'spark' }, '✻'), h('span', { class: 'w-text' }, verb), h('span', { class: 'w-meta' }, `${fmtDuration(Date.now() - live.turnStart)} · ↓ ${fmtTokens(live.outChars / 3.5)} tokens${model ? ` · ${model}` : ''} · Esc to stop`));
-  if (a?.reasoning && !a.text) el.append(h('div', { class: 'w-thought' }, latestThought(a.reasoning)));
+  if (a?.reasoning && !a.text) el.append(h('div', { class: 'w-thought' }, latestThought(tidy(a.reasoning))));
 }
 
 function renderChat(scroll = false) {
@@ -868,7 +885,12 @@ function permissionCard(p) {
     body.append(h('div', { class: 'cmd' }, h('span', { class: 'prompt' }, '$ '), r.command));
     if (r.description) body.append(h('div', { class: 'desc' }, r.description));
   } else if (r.preview?.kind === 'diff') {
-    body.innerHTML = diffTable(r.preview);
+    body.classList.add('diff-body');
+    body.innerHTML = diffTable(r.preview, { maxLines: CARD_DIFF_LINES });
+    const total = diffLineCount(r.preview);
+    const review = h('button', { class: 'btn btn-sm btn-ghost diff-expand', title: 'Open the whole change in a large view' }, icon('maximize', 'svg-sm'), total > CARD_DIFF_LINES ? `Review all ${total} lines` : 'Expand');
+    review.addEventListener('click', () => openDiffReview(p));
+    body.querySelector('.diff-file')?.append(review);
   } else {
     body.append(h('div', { class: 'cmd' }, r.subject));
     if (r.description) body.append(h('div', { class: 'desc' }, r.description));
@@ -889,7 +911,7 @@ function permissionCard(p) {
   }
   const deny = h('button', { class: 'btn btn-danger' }, 'Deny');
   deny.addEventListener('click', () => respond(p.id, { decision: 'deny' }));
-  actions.append(deny, h('span', { class: 'kbd-hint' }, h('kbd', null, 'Enter'), ' allow · ', h('kbd', null, 'Esc'), ' deny'));
+  actions.append(deny);
   const fb = h('input', { placeholder: 'Or tell FreeCode what to do instead…' });
   const sendFb = h('button', { class: 'btn btn-sm' }, 'Send');
   const doFb = () => fb.value.trim() && respond(p.id, { decision: 'deny', feedback: fb.value.trim() });
@@ -904,11 +926,64 @@ function permissionCard(p) {
   return h(
     'div',
     { class: `card ${cls}`, 'data-pending': p.id },
-    h('div', { class: 'card-head' }, icon(ico), title, p.subagent ? h('span', { class: 'badge off' }, `requested by ${p.subagent}`) : null),
+    h('div', { class: 'card-head' }, icon(ico), title, p.subagent ? h('span', { class: 'badge off' }, `requested by ${p.subagent}`) : null, h('span', { class: 'kbd-hint' }, h('kbd', null, 'Enter'), ' allow · ', h('kbd', null, 'Esc'), ' deny')),
     body,
     actions,
     h('div', { class: 'card-feedback' }, fb, sendFb),
   );
+}
+
+// Lines of a proposed edit shown inside the approval card; "Review" opens the whole change.
+const CARD_DIFF_LINES = 150;
+let review = null;
+
+function openDiffReview(p) {
+  const r = p.request;
+  const d = r.preview;
+  const overlay = $('overlay');
+  clear(overlay);
+  overlay.classList.remove('hidden');
+  const close = () => {
+    review = null;
+    overlay.classList.add('hidden');
+    clear(overlay);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  // Capture phase: Esc closes this view and must not reach the global handler (which would deny).
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  };
+  document.addEventListener('keydown', onKey, true);
+  overlay.onclick = (e) => {
+    if (e.target === overlay) close();
+  };
+  const act = (decision) => {
+    close();
+    respond(p.id, { decision });
+  };
+  const allow = h('button', { class: 'btn btn-primary' }, 'Allow');
+  allow.addEventListener('click', () => act('allow'));
+  const all = h('button', { class: 'btn' }, 'Allow all edits this session');
+  all.addEventListener('click', () => act('all_edits'));
+  const deny = h('button', { class: 'btn btn-danger' }, 'Deny');
+  deny.addEventListener('click', () => act('deny'));
+  const x = h('button', { class: 'icon-btn', title: 'Close (Esc)' }, icon('x'));
+  x.addEventListener('click', close);
+  const body = h('div', { class: 'modal-body' });
+  body.innerHTML = diffTable(d, { noHead: true });
+  const modal = h(
+    'div',
+    { class: 'modal review', tabindex: '-1' },
+    h('div', { class: 'modal-head' }, icon(d.created ? 'filePlus' : 'pencil'), h('div', { class: 'review-title' }, h('h2', null, d.created ? 'Create this file?' : 'Make this edit?'), h('div', { class: 'sub', title: d.path }, d.path)), h('span', { class: 'review-stats' }, h('span', { class: 'add' }, `+${d.added}`), h('span', { class: 'del' }, `−${d.removed}`)), x),
+    body,
+    h('div', { class: 'modal-foot' }, allow, all, deny, h('span', { class: 'kbd-hint' }, h('kbd', null, 'Esc'), ' close')),
+  );
+  overlay.append(modal);
+  modal.focus({ preventScroll: true });
+  review = { id: p.id, close };
 }
 
 function questionCard(p) {
@@ -936,7 +1011,7 @@ function questionCard(p) {
         'button',
         { class: `q-opt ${q.multiSelect ? 'multi' : ''}`, type: 'button' },
         h('span', { class: 'q-mark' }, q.multiSelect ? icon('check', 'svg-sm') : h('span', { class: 'q-dot' })),
-        h('span', { class: 'q-texts' }, h('span', { class: 'q-label' }, o.label), o.description ? h('span', { class: 'q-desc' }, o.description) : null),
+        h('span', { class: 'q-texts' }, h('span', { class: 'q-label' }, o.label), o.description ? h('span', { class: 'q-desc' }, tidy(o.description)) : null),
         h('kbd', { class: 'q-key' }, String(n + 1)),
       );
       el.addEventListener('click', () => {
@@ -971,7 +1046,7 @@ function questionCard(p) {
       'div',
       { class: 'q-block' },
       h('div', { class: 'q-head' }, q.header ? h('span', { class: 'q-chip' }, q.header) : null, q.multiSelect ? h('span', { class: 'q-hint' }, 'Choose any') : null),
-      h('div', { class: 'q-text md', html: renderMarkdown(q.question) }),
+      h('div', { class: 'q-text md', html: renderMarkdown(tidy(q.question)) }),
       tiles.length ? h('div', { class: 'q-opts' }, tiles.map((t) => t.el)) : null,
       h('div', { class: 'q-other' }, other),
     );
@@ -996,7 +1071,7 @@ function planCard(p) {
   manual.addEventListener('click', () => respond(p.id, { decision: 'default' }));
   const no = h('button', { class: 'btn btn-ghost' }, 'No, keep planning');
   no.addEventListener('click', () => respond(p.id, { decision: null }));
-  return h('div', { class: 'card plan', 'data-pending': p.id }, h('div', { class: 'card-head' }, icon('map'), 'Ready to code? Here is the plan'), h('div', { class: 'card-body', style: { maxHeight: '42vh', overflow: 'auto' } }, h('div', { class: 'md', html: renderMarkdown(p.plan) })), h('div', { class: 'card-actions' }, yes, manual, no));
+  return h('div', { class: 'card plan', 'data-pending': p.id }, h('div', { class: 'card-head' }, icon('map'), 'Ready to code? Here is the plan'), h('div', { class: 'card-body', style: { maxHeight: '42vh', overflow: 'auto' } }, h('div', { class: 'md', html: renderMarkdown(tidy(p.plan)) })), h('div', { class: 'card-actions' }, yes, manual, no));
 }
 
 function renderPending() {
@@ -1007,6 +1082,8 @@ function renderPending() {
     else if (p.kind === 'question') box.append(questionCard(p));
     else if (p.kind === 'plan') box.append(planCard(p));
   }
+  // The request under review was answered or cancelled elsewhere.
+  if (review && !S.pending.some((p) => p.id === review.id)) review.close();
 }
 
 // ---------------------------------------------------------------- composer
@@ -1494,7 +1571,7 @@ async function editRunCommand() {
   loadLaunch();
 }
 
-const OPEN_ICONS = { editor: 'code', files: 'folder', terminal: 'terminal' };
+const OPEN_ICONS = { editor: 'code', agent: 'sparkle', files: 'folder', terminal: 'terminal' };
 
 function renderTopbar() {
   const tb = $('topbar');
@@ -1539,7 +1616,7 @@ function renderTopbar() {
   const panelBtn = h('button', { class: `icon-btn ${S.ui.panelOpen ? 'active' : ''}`, title: 'Changes & tasks panel' }, icon('panelRight'));
   panelBtn.addEventListener('click', () => {
     S.ui.panelOpen = !S.ui.panelOpen;
-    localStorage.setItem('fc-panel-open', S.ui.panelOpen ? '1' : '0');
+    if (!narrowWindow.matches) localStorage.setItem('fc-panel-open', S.ui.panelOpen ? '1' : '0');
     renderPanel();
     renderTopbar();
   });
@@ -1572,7 +1649,7 @@ function renderPanel() {
   const close = h('button', { class: 'icon-btn', style: { marginLeft: 'auto' }, title: 'Close panel' }, icon('x'));
   close.addEventListener('click', () => {
     S.ui.panelOpen = false;
-    localStorage.setItem('fc-panel-open', '0');
+    if (!narrowWindow.matches) localStorage.setItem('fc-panel-open', '0');
     renderPanel();
     renderTopbar();
   });
@@ -1679,6 +1756,17 @@ function renderAll() {
   renderComposer();
   renderPanel();
 }
+
+// On a narrow window the panel floats over the chat, so it starts closed there (without changing the
+// saved preference for wide windows).
+const narrowWindow = window.matchMedia('(max-width: 900px)');
+if (narrowWindow.matches) S.ui.panelOpen = false;
+narrowWindow.addEventListener('change', () => {
+  S.ui.panelOpen = narrowWindow.matches ? false : localStorage.getItem('fc-panel-open') !== '0';
+  if (!S.state) return;
+  renderPanel();
+  renderTopbar();
+});
 
 // ---------------------------------------------------------------- global keys
 

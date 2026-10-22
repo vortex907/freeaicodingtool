@@ -43,22 +43,34 @@ jobs:
     needs: check
     if: needs.check.outputs.needed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install build tools
-        # apt on hosted runners occasionally hangs; fail fast and retry instead of blocking the queue.
-        timeout-minutes: 8
+        # apt on the hosted runner has hung for the whole step before (a slow mirror or a third-party
+        # repository). Use only the Ubuntu archive, limit every attempt and switch mirrors in between.
+        timeout-minutes: 25
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          for i in 1 2 3; do
-            sudo -E apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 update -qq &&
-            sudo -E apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends nsis g++-mingw-w64-x86-64 unzip zip && break
-            echo "apt failed (attempt $i), retrying"; sleep 15
+          PKGS="nsis g++-mingw-w64-x86-64 unzip zip"
+          . /etc/os-release
+          APT_DIR="$(mktemp -d)"
+          mkdir -p "$APT_DIR/parts"
+          ok=""
+          for MIRROR in http://azure.archive.ubuntu.com/ubuntu http://archive.ubuntu.com/ubuntu http://mirrors.edge.kernel.org/ubuntu; do
+            for POCKET in "" -updates -security; do
+              echo "deb $MIRROR ${VERSION_CODENAME}${POCKET} main universe"
+            done > "$APT_DIR/sources.list"
+            OPTS="-o Dir::Etc::SourceList=$APT_DIR/sources.list -o Dir::Etc::SourceParts=$APT_DIR/parts -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=120"
+            echo "::group::apt via $MIRROR"
+            if timeout -k 10 180 sudo -E apt-get $OPTS update -q && timeout -k 10 420 sudo -E apt-get $OPTS install -y -q --no-install-recommends $PKGS; then ok=1; fi
+            echo "::endgroup::"
+            [ -n "$ok" ] && break
+            echo "::warning::apt via $MIRROR failed, trying the next mirror"
           done
           command -v makensis && command -v x86_64-w64-mingw32-g++
       - run: npm ci

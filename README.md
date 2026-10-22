@@ -12,16 +12,17 @@
   - Models that don't support tool calling get a text-based tool protocol instead.
   - Per-minute request and token limits are paced so you hit fewer 429s.
 - **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
-- **Asks like Claude.** When a decision is yours to make, you get a card with 2–4 clickable options (with descriptions) and an "Other" box, never a vague "what do you want me to do?".
+- **Asks like Claude.** When a decision is yours to make, you get a card with 2-4 clickable options (with descriptions) and an "Other" box, never a vague "what do you want me to do?".
 - **Live answers.** For anything that changes over time (versions, game updates, news, current docs), the agent searches the web first. Search needs no API key: it tries DuckDuckGo, Bing and Mojeek in turn.
 - **Skills and a skills marketplace.** It supports Claude-compatible `SKILL.md` skills. Install them in one click from [anthropics/skills](https://github.com/anthropics/skills) or any GitHub repository, and skills in `~/.claude/skills` work too.
-- **Run and Open in.** One click runs your project in a terminal window (`npm run dev`, `dotnet run`, `python main.py`, … detected automatically) or opens it in VS Code, Cursor, Visual Studio, Explorer or a terminal.
+- **Run and Open in.** One click runs your project in a terminal window (`npm run dev`, `dotnet run`, `python main.py`, … detected automatically) or opens it in VS Code, Cursor, Visual Studio, Explorer, a terminal or Claude Code (if you have it installed).
 - **Updates itself** from GitHub releases.
 - **Live thinking.** Reasoning models' thoughts stream into a "Thinking" block, and the status line shows the current thought. When the answer starts, the block folds into "Thought for 12s" with a one-line preview.
 - **Lean on tokens:**
   - Every request is built from a trimmed view of the conversation: large outputs from finished tasks become one-line notes. In a typical multi-task session that sends about two-thirds fewer tokens per step, and your full history is kept.
   - Re-reading an unchanged file in the same task returns a short note instead of the whole file.
   - Reasoning is never resent.
+- **Plain writing, real design taste.** Every model gets the same rules: no em dashes, no filler or hype words, no emoji, and for UI work one accent color, a type scale, real states and no generic gradient look. Em dashes that slip through are rewritten as normal punctuation (Settings → General → *No em dashes in replies*).
 - **Good habits even on small models.** The built-in playbook makes models explore first, plan, make small complete edits and verify them by actually running the code. It also has design rules, so the apps it builds look modern by default.
 - **Safe by default.** It asks before edits and commands, with permission modes and allow/deny rules. Checkpoints let you undo any change. Project settings are ignored until you trust the folder.
 - **Extensible:**
@@ -88,7 +89,7 @@ The first time FreeCode opens, it lists the free providers. For each one you wan
 | Z.ai (GLM) | Free GLM Flash models | [z.ai](https://z.ai/manage-apikey/apikey-list) |
 | Cloudflare Workers AI | Daily free allowance | [dash.cloudflare.com](https://dash.cloudflare.com/profile/api-tokens) |
 | SambaNova, Hugging Face, Together, SiliconFlow, Vercel AI Gateway, Kilo, OpenCode Zen, Chutes | Free models or monthly credits | listed in the app |
-| LLM7.io, Pollinations | **No signup needed** (used automatically) | — |
+| LLM7.io, Pollinations | **No signup needed** (used automatically) | not needed |
 | Ollama, LM Studio | Local models on your own computer | [ollama.com](https://ollama.com/download) |
 
 Paid providers (DeepSeek, OpenAI, Anthropic, xAI, Moonshot, Alibaba, Scaleway) are supported too. The router only uses them if you turn on `router.allowPaid`.
@@ -117,9 +118,9 @@ To pin a model, use the model picker or `freecode -m groq/openai/gpt-oss-120b`. 
   - **Edit automatically**
   - **Plan mode**: read-only until you approve a plan
   - **Don't ask**: allows everything, so use it carefully
-- Approval cards let you allow once, always allow a rule, or deny with feedback. Esc stops a running task.
+- Approval cards let you allow once, always allow a rule, or deny with feedback. Big edits show their first lines; **Review all N lines** opens the whole diff full size. Esc stops a running task.
 - The right panel shows **Changes** (with *Undo last changes*), **Tasks** (the agent's todo list) and **Usage**.
-- The top bar has **Run** (starts the project in a terminal window; the ▾ menu changes the command) and **Open** (VS Code, Cursor, Windsurf, Visual Studio, Explorer/Finder, Terminal).
+- The top bar has **Run** (starts the project in a terminal window; the ▾ menu changes the command) and **Open** (VS Code, Cursor, Windsurf, Visual Studio, Explorer/Finder, Terminal, Claude Code).
 - Shell snippets in answers have a **Run** button next to **Copy**.
 - **Settings → Skills:** see your installed skills, browse a marketplace (default [anthropics/skills](https://github.com/anthropics/skills)), and add more marketplaces as `owner/repo`. The agent loads a skill with the Skill tool when a task matches it. Try **frontend-design** for better-looking UIs.
 - Slash commands:

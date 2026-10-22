@@ -132,6 +132,8 @@ export interface Settings {
   setupCompleted?: boolean;
   /** Download and install new versions from GitHub automatically (default true). */
   autoUpdate?: boolean;
+  /** Rewrite em and en dashes in the agent's replies as plain punctuation (default true). */
+  plainPunctuation?: boolean;
   /** How to start this project (the app's Run button). */
   runCommand?: string;
   /** Skills marketplaces: GitHub repositories ("owner/repo") with SKILL.md folders. */

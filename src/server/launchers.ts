@@ -2,13 +2,14 @@
 // window) for the app's top bar.
 import { execFile, spawn, type SpawnOptions } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { isMac, isWindows, which } from '../util/platform.js';
 
 export interface OpenTarget {
   id: string;
   name: string;
-  kind: 'editor' | 'files' | 'terminal';
+  kind: 'editor' | 'agent' | 'files' | 'terminal';
 }
 
 export interface RunCommand {
@@ -74,6 +75,15 @@ function findEditors(): Found[] {
   return found;
 }
 
+/** The Claude Code CLI, if installed. It runs in its own terminal and the user signs in to it with their own plan. */
+function claudeCode(): string | null {
+  const home = os.homedir();
+  const known = isWindows
+    ? [path.join(home, '.local', 'bin', 'claude.exe'), expandWin('%APPDATA%\\npm\\claude.cmd')]
+    : [path.join(home, '.local', 'bin', 'claude'), path.join(home, '.claude', 'local', 'claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude'];
+  return known.find((p) => p && existsSync(p)) ?? which('claude');
+}
+
 function visualStudio(): string | null {
   if (!isWindows) return null;
   const vswhere = expandWin('%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe');
@@ -93,6 +103,7 @@ function findSolution(dir: string): string | null {
 export function openTargets(dir: string): OpenTarget[] {
   const out: OpenTarget[] = findEditors().map((f) => ({ id: f.def.id, name: f.def.name, kind: 'editor' as const }));
   if (findSolution(dir) && visualStudio()) out.push({ id: 'visualstudio', name: 'Visual Studio', kind: 'editor' });
+  if (claudeCode()) out.push({ id: 'claude', name: 'Claude Code', kind: 'agent' });
   out.push({ id: 'files', name: isWindows ? 'File Explorer' : isMac ? 'Finder' : 'Files', kind: 'files' });
   out.push({ id: 'terminal', name: isWindows ? 'Terminal' : 'Terminal', kind: 'terminal' });
   return out;
@@ -131,6 +142,11 @@ export async function openIn(target: string, dir: string): Promise<{ ok: boolean
       detached(t.file, t.args(dir));
     }
     return { ok: true };
+  }
+  if (target === 'claude') {
+    const exe = claudeCode();
+    if (!exe) return { ok: false, error: 'Claude Code is not installed (see claude.com/claude-code)' };
+    return runInTerminal(isWindows ? `"${exe}"` : `'${exe.replace(/'/g, `'\\''`)}'`, dir, 'Claude Code');
   }
   if (target === 'visualstudio') {
     const sln = findSolution(dir);
@@ -214,7 +230,7 @@ function readFileSafe(file: string): string {
 }
 
 /** Starts `command` in its own terminal window in `dir` (so the user sees its output and can stop it). */
-export function runInTerminal(command: string, dir: string): { ok: boolean; error?: string } {
+export function runInTerminal(command: string, dir: string, title = 'FreeCode run'): { ok: boolean; error?: string } {
   const open = /^open\s+(.+)$/i.exec(command.trim());
   if (open) {
     // "open index.html": show a page in the browser.
@@ -225,9 +241,9 @@ export function runInTerminal(command: string, dir: string): { ok: boolean; erro
   }
   if (isWindows) {
     powershell(
-      // A fixed title: putting the command there too would split it at its own "&&".
-      "Start-Process -FilePath cmd.exe -WorkingDirectory $env:FC_DIR -ArgumentList '/k', ('title FreeCode run & ' + $env:FC_RUN)",
-      { FC_DIR: dir, FC_RUN: command },
+      // A plain title: putting the command there too would split it at its own "&&".
+      "Start-Process -FilePath cmd.exe -WorkingDirectory $env:FC_DIR -ArgumentList '/k', ('title ' + $env:FC_TITLE + ' & ' + $env:FC_RUN)",
+      { FC_DIR: dir, FC_RUN: command, FC_TITLE: title },
     );
     return { ok: true };
   }
