@@ -56,8 +56,8 @@ export function invalidateFileListCache(): void {
   listCache.clear();
 }
 
-/** Parses simple .gitignore patterns for the non-git fallback. */
-async function readGitignore(dir: string): Promise<string[]> {
+/** Parses simple .gitignore patterns for the non-git fallback (and the code index walker). */
+export async function readGitignore(dir: string): Promise<string[]> {
   try {
     const raw = await fsp.readFile(path.join(dir, '.gitignore'), 'utf8');
     return raw
@@ -69,7 +69,7 @@ async function readGitignore(dir: string): Promise<string[]> {
   }
 }
 
-function ignoredByPatterns(rel: string, isDir: boolean, patterns: string[]): boolean {
+export function ignoredByPatterns(rel: string, isDir: boolean, patterns: string[]): boolean {
   for (let p of patterns) {
     const dirOnly = p.endsWith('/');
     if (dirOnly) {

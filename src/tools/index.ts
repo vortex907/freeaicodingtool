@@ -11,6 +11,8 @@ import { DesktopTool } from './desktopTool.js';
 import { ReplTool } from './repl.js';
 import { DebuggerTool } from './debugger.js';
 import { isWindows } from '../util/platform.js';
+import { CodeSearchTool } from './codeSearch.js';
+import { isCodeIndexEnabled } from '../codeindex/index.js';
 
 export const BUILTIN_TOOLS: Tool[] = [
   ReadTool,
@@ -25,6 +27,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   GlobTool,
   GrepTool,
   LSTool,
+  CodeSearchTool,
   WebFetchTool,
   WebSearchTool,
   BrowserTool,
@@ -54,7 +57,7 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   let tools = [...BUILTIN_TOOLS, ...(opts.extra ?? [])];
   if (opts.depth > 0) {
     const explore = opts.agentType === 'explore';
-    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'TodoWrite', 'REPL', 'Debugger'])]);
+    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'CodeSearch', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'TodoWrite', 'REPL', 'Debugger'])]);
     tools = tools.filter((t) => allowed.has(t.name) || t.category === 'mcp');
   } else {
     if (!opts.planMode) tools = tools.filter((t) => t.name !== 'ExitPlanMode');
@@ -62,6 +65,7 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   if (!opts.interactive) tools = tools.filter((t) => t.name !== 'AskUserQuestion');
   if (!opts.hasSkills) tools = tools.filter((t) => t.name !== 'Skill');
   if (!isWindows) tools = tools.filter((t) => t.name !== 'Desktop');
+  if (!isCodeIndexEnabled()) tools = tools.filter((t) => t.name !== 'CodeSearch');
   if (opts.disallowed?.length) {
     const deny = new Set(opts.disallowed.map((d) => d.replace(/\(.*$/, '')));
     tools = tools.filter((t) => !deny.has(t.name));
@@ -105,6 +109,9 @@ const ALIASES: Record<string, string> = {
   search_files: 'Grep',
   grep_search: 'Grep',
   codebase_search: 'Grep',
+  semantic_search: 'CodeSearch',
+  search_code: 'CodeSearch',
+  code_search: 'CodeSearch',
   ls: 'LS',
   list_dir: 'LS',
   list_directory: 'LS',
