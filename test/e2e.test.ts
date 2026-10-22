@@ -326,3 +326,31 @@ test('models with zero free quota are benched for days', async () => {
   const pro = Object.entries(health.models).find(([k]) => k.endsWith('gemini-3-pro-preview'))?.[1];
   assert.ok(pro?.disabledUntil && pro.disabledUntil - Date.now() > 2 * 24 * 3600_000, 'benched for days');
 });
+
+test('Claude: auto mode skips the paid key, a picked Claude model gets requests it accepts', async () => {
+  const env = setup({ free1: { model: 'free-model', quality: 80 } }, { temperature: 0.2 });
+  const cfgFile = path.join(env.home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgFile, 'utf8')) as { providers: Record<string, unknown> };
+  // The built-in Anthropic definition with its own model list, only the address points at the mock.
+  cfg.providers.anthropic = { baseURL: server.baseURL('anthropic'), apiKey: 'test-key', discover: false };
+  writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+  server.script('free1', [text('free answer')]);
+  const auto = await runCli(env, ['-p', 'say hi']);
+  assert.equal(auto.code, 0, auto.stderr);
+  assert.match(auto.stdout, /free answer/);
+  assert.equal(server.requestsFor('anthropic').length, 0, 'paid models stay out of auto mode');
+  assert.equal(server.requestsFor('free1').at(-1)!.body.temperature, 0.2, 'other providers still get the temperature');
+
+  server.script('anthropic', [text('Claude here.')]);
+  const picked = await runCli(env, ['-p', 'say hi', '--model', 'anthropic/claude-opus-5-5']);
+  assert.equal(picked.code, 0, picked.stderr);
+  assert.match(picked.stdout, /Claude here/);
+  const body = server.requestsFor('anthropic').at(-1)!.body;
+  assert.equal(body.model, 'claude-opus-5-5');
+  // Claude 4.7 and later answer 400 to a temperature below 1 and to a forced tool_choice.
+  assert.ok(!('temperature' in body), 'no temperature');
+  assert.ok(!('top_p' in body) && !('top_k' in body));
+  assert.equal(body.tool_choice, 'auto');
+  assert.ok(typeof body.max_tokens === 'number' && body.max_tokens > 0);
+  assert.deepEqual(body.stream_options, { include_usage: true });
+});

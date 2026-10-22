@@ -98,7 +98,7 @@ function buildModel(def: ProviderDef, seed: SeedModel | undefined, disc: Discove
     roles: seed?.roles ?? [],
     source,
     enabled: user?.enabled !== false,
-    priority: user?.priority ?? 0,
+    priority: user?.priority ?? seed?.priority ?? 0,
     paid,
     noSystemRole: seed?.noSystemRole ?? /gemma-?3/i.test(id),
   };

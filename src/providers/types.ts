@@ -74,6 +74,8 @@ export interface ProviderQuirks {
   toolMessageName?: boolean;
   /** Always send max tokens (provider default is tiny). */
   requireMaxTokens?: boolean;
+  /** Never send `temperature`: Claude 4.7 and later and OpenAI's reasoning models only accept the default. */
+  noTemperature?: boolean;
   /** Gemini 3: tool calls carry thought signatures (extra_content) that must be sent back. */
   thoughtSignatures?: boolean;
 }
@@ -95,6 +97,8 @@ export interface SeedModel {
   roles?: ModelRole[];
   /** Model ignores the system role (merge it into the first user message). */
   noSystemRole?: boolean;
+  /** Added to the router score (negative keeps a costly model for when it is picked by name). */
+  priority?: number;
 }
 
 export type ModelRole = 'router' | 'summarizer';

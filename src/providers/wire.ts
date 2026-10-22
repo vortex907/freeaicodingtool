@@ -291,7 +291,7 @@ export function buildRequestBody(messages: ChatMessage[], opts: WireOptions): Re
   if (opts.maxTokens && (!minimal || quirks.requireMaxTokens)) {
     body[quirks.maxTokensField ?? 'max_tokens'] = opts.maxTokens;
   }
-  if (opts.temperature !== undefined && !minimal) body.temperature = opts.temperature;
+  if (opts.temperature !== undefined && !minimal && !quirks.noTemperature) body.temperature = opts.temperature;
   if (!minimal) {
     if (quirks.streamUsage && body.stream) body.stream_options = { include_usage: true };
     if (model.extraBody) Object.assign(body, model.extraBody);

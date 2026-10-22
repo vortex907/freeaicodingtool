@@ -475,7 +475,7 @@ export const PROVIDERS: ProviderDef[] = [
     freeTier: 'Paid; only used automatically if router.allowPaid is on',
     kind: 'paid',
     speed: 65,
-    quirks: { streamUsage: true, maxTokensField: 'max_completion_tokens' },
+    quirks: { streamUsage: true, maxTokensField: 'max_completion_tokens', noTemperature: true },
     models: [
       { id: 'gpt-5-mini', context: 400000, maxOutput: 128000, quality: 84, speed: 60, reasoning: true },
       { id: 'gpt-5', context: 400000, maxOutput: 128000, quality: 93, speed: 40, reasoning: true, vision: true },
@@ -488,14 +488,20 @@ export const PROVIDERS: ProviderDef[] = [
     baseURL: 'https://api.anthropic.com/v1',
     keyEnv: ['ANTHROPIC_API_KEY'],
     keyRequired: true,
-    signupUrl: 'https://console.anthropic.com/settings/keys',
-    freeTier: 'Paid; only used automatically if router.allowPaid is on',
+    signupUrl: 'https://platform.claude.com/settings/keys',
+    freeTier: 'Paid per token (no free tier); only used automatically if router.allowPaid is on',
     kind: 'paid',
     speed: 65,
-    quirks: { requireMaxTokens: true },
+    // Anthropic's OpenAI-compatible endpoint. Claude 5 models think by default (the thinking is not sent back
+    // here) and answer 400 to a temperature below 1. Opus 5.5, Sonnet 5.5 and Fable 5.1 also reject a forced
+    // tool_choice, and FreeCode only ever sends "auto".
+    quirks: { requireMaxTokens: true, streamUsage: true, noTemperature: true },
     models: [
-      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', context: 200000, maxOutput: 64000, quality: 96, speed: 60, vision: true },
-      { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', context: 200000, maxOutput: 64000, quality: 88, speed: 80, vision: true },
+      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', context: 1000000, maxOutput: 128000, quality: 98, speed: 50, reasoning: true, vision: true },
+      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', context: 1000000, maxOutput: 128000, quality: 96, speed: 60, reasoning: true, vision: true },
+      { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', context: 1000000, maxOutput: 128000, quality: 88, speed: 80, reasoning: true, vision: true },
+      // Costs 2.5 times as much as Opus 5.5, so auto mode prefers Opus. Pick Fable in the model menu to use it.
+      { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', context: 1000000, maxOutput: 128000, quality: 99, speed: 35, reasoning: true, vision: true, priority: -6 },
     ],
     discovery: { type: 'none' },
   },

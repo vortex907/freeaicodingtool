@@ -615,9 +615,9 @@ export class Controller {
 
   models(): unknown[] {
     const h = this.app.health;
+    // Paid models are listed too: picking one by hand is allowed even when auto mode keeps to free ones.
     return this.app.router
       .allModels()
-      .filter(({ p }) => !p.paid || this.app.settings.router.allowPaid)
       .sort((a, b) => b.m.quality - a.m.quality)
       .map(({ p, m }) => {
         const wait = h.waitInfo(p, m);

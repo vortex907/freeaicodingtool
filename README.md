@@ -100,7 +100,9 @@ The first time FreeCode opens, it lists the free providers. For each one you wan
 | LLM7.io, Pollinations | **No signup needed** (used automatically) | not needed |
 | Ollama, LM Studio | Local models on your own computer | [ollama.com](https://ollama.com/download) |
 
-Paid providers (DeepSeek, OpenAI, Anthropic, xAI, Moonshot, Alibaba, Scaleway) are supported too. The router only uses them if you turn on `router.allowPaid`.
+Paid providers (DeepSeek, OpenAI, Anthropic, xAI, Moonshot, Alibaba, Scaleway) are supported too. Auto mode only uses them if you turn on `router.allowPaid`, but once a key is saved you can always pick one of their models in the model menu.
+
+**Claude models.** With an Anthropic API key (create one at [platform.claude.com](https://platform.claude.com/settings/keys)) the model menu lists Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1. The API is paid per token and has no free tier, and a Claude Pro or Max subscription does not include API usage. To use your subscription instead, open the project in Claude Code from the **Open** menu and sign in there with your Claude account.
 
 Keys are saved only on your computer, in `~/.freecode/config.json`, readable only by you. You can also set them as environment variables (`GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, …) or in `~/.freecode/.env`.
 

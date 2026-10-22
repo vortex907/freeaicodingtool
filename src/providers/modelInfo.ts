@@ -14,11 +14,15 @@ interface FamilyRule {
 
 // Order matters: the first matching rule wins, so specific patterns come first.
 const FAMILY_RULES: FamilyRule[] = [
-  // Anthropic
-  { re: /claude.*opus/i, quality: 97, context: 200000, vision: true },
-  { re: /claude.*sonnet/i, quality: 95, context: 200000, vision: true },
-  { re: /claude.*haiku/i, quality: 86, context: 200000, vision: true },
-  { re: /claude/i, quality: 88, context: 200000 },
+  // Anthropic (Claude 5 models think by default and have a 1M context window; older ones are listed at 200K)
+  { re: /claude.*fable/i, quality: 99, reasoning: true, context: 1000000, vision: true },
+  { re: /claude.*opus[-.]?[5-9]/i, quality: 98, reasoning: true, context: 1000000, vision: true },
+  { re: /claude.*sonnet[-.]?[5-9]/i, quality: 96, reasoning: true, context: 1000000, vision: true },
+  { re: /claude.*haiku[-.]?[5-9]/i, quality: 88, reasoning: true, context: 1000000, vision: true },
+  { re: /claude.*opus/i, quality: 94, context: 200000, vision: true },
+  { re: /claude.*sonnet/i, quality: 92, context: 200000, vision: true },
+  { re: /claude.*haiku/i, quality: 80, context: 200000, vision: true },
+  { re: /claude/i, quality: 85, context: 200000 },
   // OpenAI
   { re: /gpt-oss-120b/i, quality: 74, reasoning: true, context: 131072 },
   { re: /gpt-oss-20b/i, quality: 58, reasoning: true, context: 131072 },

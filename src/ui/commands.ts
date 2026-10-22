@@ -139,10 +139,7 @@ export function builtinCommands(): SlashCommand[] {
           return;
         }
         const options: SelectOption<string>[] = [{ label: 'auto', value: 'auto', description: 'AI router picks the best available model for every task (recommended)', status: r.app.pinnedModel ? '' : theme.success('current') }];
-        const models = r.app.router
-          .allModels()
-          .filter(({ p }) => !p.paid || r.app.settings.router.allowPaid)
-          .sort((x, y) => y.m.quality - x.m.quality);
+        const models = r.app.router.allModels().sort((x, y) => y.m.quality - x.m.quality);
         for (const { p, m } of models) {
           const o = modelLine(r, p, m, r.width());
           if (r.app.pinnedModel === m.key) o.status = theme.success('current');
