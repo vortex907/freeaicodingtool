@@ -1,6 +1,8 @@
 // FreeCode CLI entry: argument parsing, interactive mode, print mode and subcommands.
 import * as path from 'node:path';
-import { promises as fsp } from 'node:fs';
+import * as os from 'node:os';
+import { spawn } from 'node:child_process';
+import { promises as fsp, mkdirSync, openSync, renameSync, statSync, writeSync } from 'node:fs';
 import { VERSION } from './version.js';
 import { App } from './app.js';
 import type { AgentEvent } from './agent/agent.js';
@@ -16,7 +18,7 @@ import { checkKey } from './providers/validate.js';
 import { qualityTier } from './providers/modelInfo.js';
 import { HealthStore, humanMs } from './router/health.js';
 import { listSessions } from './session/session.js';
-import { c, setColorLevel, theme } from './util/ansi.js';
+import { c, setColorLevel, stripAnsi, theme } from './util/ansi.js';
 import { enableDebug } from './util/log.js';
 import { formatTokens, truncate } from './util/strings.js';
 import { gitRoot } from './util/git.js';
@@ -48,11 +50,18 @@ interface CliArgs {
   tui: boolean;
   noOpen: boolean;
   port?: number;
+  /** Started from a desktop shortcut: reuse a running app, open the last project, log to a file. */
+  desktop: boolean;
+  /** Re-launch in the background without a console window, then exit. */
+  detach: boolean;
+  /** Whether --cwd was given explicitly. */
+  cwdSet: boolean;
+  remove: boolean;
   command?: string;
   commandArgs: string[];
 }
 
-const SUBCOMMANDS = new Set(['setup', 'providers', 'models', 'doctor', 'config', 'mcp', 'sessions', 'help', 'version', 'app', 'gui', 'web', 'tui']);
+const SUBCOMMANDS = new Set(['setup', 'providers', 'models', 'doctor', 'config', 'mcp', 'sessions', 'help', 'version', 'app', 'gui', 'web', 'tui', 'install-shortcut', 'shortcut']);
 
 function splitList(v: string): string[] {
   return v
@@ -81,6 +90,10 @@ export function parseArgs(argv: string[]): CliArgs {
     noColor: false,
     tui: false,
     noOpen: false,
+    desktop: false,
+    detach: false,
+    cwdSet: false,
+    remove: false,
     commandArgs: [],
   };
   const rest: string[] = [];
@@ -155,6 +168,7 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--cwd':
       case '-C':
         a.cwd = path.resolve(val());
+        a.cwdSet = true;
         break;
       case '--no-router':
         a.noRouter = true;
@@ -203,6 +217,15 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--port':
         a.port = Number(val());
         break;
+      case '--desktop':
+        a.desktop = true;
+        break;
+      case '--detach':
+        a.detach = true;
+        break;
+      case '--remove':
+        a.remove = true;
+        break;
       default:
         if (arg.startsWith('-') && arg.length > 1 && !/^-\d/.test(arg)) throw new Error(`Unknown option: ${arg} (see freecode --help)`);
         rest.push(arg);
@@ -231,6 +254,7 @@ Commands:
   freecode config get|set|path       read or change settings (e.g. config set router.allowPaid true)
   freecode mcp list|add|remove       manage MCP servers
   freecode sessions                  list saved conversations for this project
+  freecode install-shortcut          add a FreeCode icon to your desktop and app menu (--remove to undo)
 
 Options:
   -p, --print                 non-interactive: run the prompt, print the result, exit
@@ -248,6 +272,7 @@ Options:
   --tui                       terminal interface instead of the app window
   --port <n>                  port for the app (default 7720)
   --no-open                   start the app server without opening a window
+  --desktop                   act like the desktop icon: reuse an open window, start in the last project
   --no-router                 rate tasks with the keyword heuristic instead of the router AI
   --allow-paid                allow paid providers in automatic routing
   --setup / --skip-setup      force or skip the provider setup screen
@@ -547,12 +572,86 @@ async function cmdSessions(cwd: string): Promise<number> {
 
 // ------------------------------------------------------------------ app window (GUI)
 
+/** Desktop launches have no console, so everything printed also goes to ~/.freecode/logs/desktop.log. */
+function logToFile(): void {
+  const dir = path.join(globalPaths.home, 'logs');
+  mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'desktop.log');
+  try {
+    if (statSync(file).size > 1_000_000) renameSync(file, `${file}.old`);
+  } catch {
+    // no log yet
+  }
+  const fd = openSync(file, 'a');
+  const write = (chunk: unknown) => {
+    try {
+      if (typeof chunk === 'string') writeSync(fd, stripAnsi(chunk));
+      else if (chunk instanceof Uint8Array) writeSync(fd, chunk);
+    } catch {
+      // logging must never break the app
+    }
+  };
+  for (const stream of [process.stdout, process.stderr]) {
+    const original = stream.write.bind(stream) as (...args: unknown[]) => boolean;
+    stream.write = ((chunk: unknown, ...rest: unknown[]) => {
+      write(chunk);
+      return original(chunk, ...rest);
+    }) as typeof stream.write;
+  }
+  write(`\n--- ${new Date().toISOString()} FreeCode ${VERSION} ---\n`);
+  process.on('uncaughtException', (e) => {
+    write(`Fatal error: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`);
+    process.exit(1);
+  });
+}
+
+function isDir(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The folder a desktop launch opens: the most recent project, else ~/FreeCode (created on first use). */
+function desktopProject(): string {
+  const recent = ((readGlobalConfig() as Record<string, unknown>).recentProjects as string[] | undefined) ?? [];
+  const last = recent.find(isDir);
+  if (last) return last;
+  const workspace = path.join(os.homedir(), 'FreeCode');
+  mkdirSync(workspace, { recursive: true });
+  return workspace;
+}
+
 async function runGui(a: CliArgs): Promise<number> {
+  if (a.desktop) {
+    setColorLevel(0);
+    logToFile();
+  }
   const { startServer } = await import('./server/server.js');
   const { launchApp } = await import('./server/launch.js');
+  const { liveInstances, registerInstance, instanceUrl, samePath } = await import('./desktop/instance.js');
+  let cwd = a.cwd;
+  if (a.desktop) {
+    // A folder handed over by the launcher (or dropped on the icon) opens that folder.
+    if (!a.cwdSet && a.prompt.length === 1 && isDir(path.resolve(a.prompt[0]!))) {
+      cwd = path.resolve(a.prompt[0]!);
+      a.cwdSet = true;
+      a.prompt = [];
+    }
+    if (!a.noOpen) {
+      const reuse = (await liveInstances()).find((i) => !a.cwdSet || samePath(i.projectRoot, cwd));
+      if (reuse) {
+        process.stdout.write(`FreeCode is already running (pid ${reuse.pid}); opening a window on it.\n`);
+        launchApp(instanceUrl(reuse));
+        return 0;
+      }
+    }
+    if (!a.cwdSet) cwd = desktopProject();
+  }
   process.stdout.write(`${theme.brand('✻ FreeCode')} ${c.dim(VERSION)} starting…\n`);
   const srv = await startServer({
-    cwd: a.cwd,
+    cwd,
     port: a.port,
     permissionMode: a.permissionMode,
     model: a.model,
@@ -562,6 +661,7 @@ async function runGui(a: CliArgs): Promise<number> {
     overrides: overridesFrom(a),
     initialPrompt: a.prompt.join(' ').trim() || undefined,
   });
+  const unregister = registerInstance({ pid: process.pid, port: srv.port, token: srv.token, version: VERSION, startedAt: Date.now() });
   let resolveExit: () => void = () => undefined;
   const done = new Promise<void>((r) => (resolveExit = r));
   const launched = a.noOpen ? { mode: 'none' as const } : launchApp(srv.url);
@@ -581,13 +681,42 @@ async function runGui(a: CliArgs): Promise<number> {
     process.stdout.write(`Open this address in your browser to use FreeCode:\n\n  ${theme.accent(srv.url)}\n\n${c.dim(`(Over SSH: ssh -L ${srv.port}:127.0.0.1:${srv.port} <host>, then open the address locally.)  Ctrl+C quits.`)}\n`);
   }
   if (a.noOpen && launched.mode === 'none') process.stdout.write(c.dim(`App address: ${srv.url}\n`));
+  if (a.desktop && launched.mode !== 'none') {
+    // Without a console there is no Ctrl+C: quit once no window has been connected for a minute.
+    // Counting ticks instead of wall time keeps a sleeping laptop from looking like a closed window.
+    let idle = 0;
+    let seen = false;
+    const timer = setInterval(() => {
+      if (srv.clientCount() > 0) {
+        seen = true;
+        idle = 0;
+      } else if (++idle >= (seen ? 12 : 60)) resolveExit();
+    }, 5000);
+    timer.unref();
+  }
   const onSignal = () => resolveExit();
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   await done;
   process.stdout.write(c.dim('Shutting down…\n'));
+  unregister();
   await srv.close();
   return 0;
+}
+
+async function cmdShortcut(remove: boolean): Promise<number> {
+  const { installShortcuts } = await import('./desktop/shortcut.js');
+  try {
+    const r = await installShortcuts({ remove });
+    for (const p of r.created) console.log(`${theme.success('✓')} Created ${p}`);
+    for (const p of r.removed) console.log(`${theme.success('✓')} Removed ${p}`);
+    if (!r.created.length && !r.removed.length) console.log(remove ? 'No FreeCode shortcuts found.' : 'No shortcut was created.');
+    for (const n of r.notes) console.log(c.dim(n));
+    return 0;
+  } catch (e) {
+    console.error(`Could not ${remove ? 'remove' : 'create'} the shortcut: ${(e as Error).message}`);
+    return 1;
+  }
 }
 
 // ------------------------------------------------------------------ main
@@ -599,6 +728,12 @@ export async function main(argv: string[]): Promise<number> {
   } catch (e) {
     console.error((e as Error).message);
     return 2;
+  }
+  if (a.detach) {
+    // Start again in the background with no console window (used by the Windows shortcut).
+    const child = spawn(process.execPath, [process.argv[1]!, ...argv.filter((x) => x !== '--detach')], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    return 0;
   }
   if (a.noColor) setColorLevel(0);
   if (a.debug) enableDebug();
@@ -642,6 +777,9 @@ export async function main(argv: string[]): Promise<number> {
       return cmdMcp(a.commandArgs);
     case 'sessions':
       return cmdSessions(a.cwd);
+    case 'install-shortcut':
+    case 'shortcut':
+      return cmdShortcut(a.remove || a.commandArgs[0] === 'remove');
   }
   if (a.print || (!process.stdin.isTTY && (a.prompt.length || a.tui))) return runPrint(a);
   if (!a.tui) return runGui(a);

@@ -11,6 +11,7 @@ import { Controller } from './controller.js';
 import type { PermissionMode, Settings } from '../config/config.js';
 import { openInBrowser } from '../ui/setup.js';
 import { debug } from '../util/log.js';
+import { VERSION } from '../version.js';
 
 export interface ServerOptions {
   cwd: string;
@@ -32,6 +33,7 @@ const MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  '.webmanifest': 'application/manifest+json',
   '.json': 'application/json',
   '.woff2': 'font/woff2',
 };
@@ -70,6 +72,8 @@ export interface RunningServer {
   token: string;
   port: number;
   controller: Controller;
+  /** Number of app windows/tabs currently connected. */
+  clientCount: () => number;
   close: () => Promise<void>;
 }
 
@@ -159,6 +163,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           });
           return;
         }
+        case 'GET /api/instance':
+          return json(res, 200, { pid: process.pid, version: VERSION, projectRoot: controller.app.projectRoot, busy: controller.busy });
         case 'GET /api/state': {
           const st = await controller.state(true);
           st.pendingTrust = pendingTrust;
@@ -267,6 +273,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     token,
     port,
     controller,
+    clientCount: () => clients.size,
     close: async () => {
       for (const c of clients) {
         try {
