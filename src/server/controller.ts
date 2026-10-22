@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import { App } from '../app.js';
 import type { AgentEvent, PermissionAnswer } from '../agent/agent.js';
 import { safeLabel } from '../agent/agent.js';
-import type { PermissionRequest, Todo, ToolDisplay } from '../tools/types.js';
+import type { PermissionRequest, Todo, ToolDisplay, UserQuestion, QuestionAnswer } from '../tools/types.js';
 import { findTool } from '../tools/index.js';
 import type { PermissionMode, Settings } from '../config/config.js';
 import { isTrustedFolder, loadConfig, projectHasRiskySettings, readGlobalConfig, setByPath, updateGlobalConfig, updateProjectSettings } from '../config/config.js';
@@ -35,7 +35,7 @@ export type UIItem =
 
 export type Pending =
   | { id: string; kind: 'permission'; request: PermissionRequest; subagent?: string; toolCallId?: string }
-  | { id: string; kind: 'question'; question: string; options?: string[] }
+  | { id: string; kind: 'question'; questions: UserQuestion[] }
   | { id: string; kind: 'plan'; plan: string };
 
 type PendingEntry = { item: Pending; resolve: (v: unknown) => void };
@@ -94,7 +94,7 @@ export class Controller {
     await app.init({
       onEvent: (e) => this.onAgentEvent(e),
       askPermission: (req, meta) => this.ask<PermissionAnswer>({ id: nextId('perm'), kind: 'permission', request: req, subagent: meta.subagent, toolCallId: meta.toolCallId }),
-      askUser: (q, options) => this.ask<string | null>({ id: nextId('q'), kind: 'question', question: q, options }),
+      askUser: (questions) => this.ask<QuestionAnswer[] | null>({ id: nextId('q'), kind: 'question', questions }),
       approvePlan: (plan) => this.ask<'acceptEdits' | 'default' | null>({ id: nextId('plan'), kind: 'plan', plan }),
     });
     this.app = app;
@@ -142,7 +142,19 @@ export class Controller {
       p.resolve(ans);
       if (ans.switchMode) setTimeout(() => this.pushState(), 10);
     } else if (p.item.kind === 'question') {
-      p.resolve(typeof payload.answer === 'string' ? payload.answer : null);
+      const raw = payload.answers;
+      if (!Array.isArray(raw)) p.resolve(null);
+      else {
+        p.resolve(
+          p.item.questions.map((q, i): QuestionAnswer => {
+            const a = (raw[i] ?? {}) as { selected?: unknown; other?: unknown };
+            const allowed = new Set(q.options.map((o) => o.label));
+            const selected = Array.isArray(a.selected) ? a.selected.map(String).filter((l) => allowed.has(l)) : [];
+            const other = typeof a.other === 'string' && a.other.trim() ? a.other.trim().slice(0, 4000) : undefined;
+            return { question: q.question, header: q.header, selected: q.multiSelect ? selected : selected.slice(0, 1), other };
+          }),
+        );
+      }
     } else {
       const d = payload.decision;
       p.resolve(d === 'acceptEdits' || d === 'default' ? d : null);
@@ -211,6 +223,7 @@ export class Controller {
         webSearch: { provider: s.webSearch.provider, hasBrave: !!s.webSearch.braveApiKey, hasTavily: !!s.webSearch.tavilyApiKey, searxngUrl: s.webSearch.searxngUrl ?? '' },
         permissions: { allow: s.permissions.allow, deny: s.permissions.deny, defaultMode: s.permissions.mode },
         saveSessions: s.saveSessions,
+        autoUpdate: s.autoUpdate !== false,
       },
       mcp: [...app.mcp.entries].map((e) => {
         const cl = app.mcp.clients.get(e.name);
@@ -602,7 +615,7 @@ export class Controller {
   // ------------------------------------------------------------------ settings
 
   updateSettings(patch: Record<string, unknown>): void {
-    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model'];
+    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate'];
     updateGlobalConfig((g) => {
       for (const [k, v] of Object.entries(patch)) if (allowed.includes(k)) setByPath(g as Record<string, unknown>, k, v);
     });

@@ -63,7 +63,7 @@ interface CliArgs {
   commandArgs: string[];
 }
 
-const SUBCOMMANDS = new Set(['setup', 'providers', 'models', 'doctor', 'config', 'mcp', 'sessions', 'help', 'version', 'app', 'gui', 'web', 'tui', 'install-shortcut', 'shortcut']);
+const SUBCOMMANDS = new Set(['setup', 'providers', 'models', 'doctor', 'config', 'mcp', 'sessions', 'help', 'version', 'app', 'gui', 'web', 'tui', 'install-shortcut', 'shortcut', 'update']);
 
 function splitList(v: string): string[] {
   return v
@@ -263,6 +263,7 @@ Commands:
   freecode mcp list|add|remove       manage MCP servers
   freecode sessions                  list saved conversations for this project
   freecode install-shortcut          add a FreeCode icon to your desktop and app menu (--remove to undo)
+  freecode update                    update to the newest version from GitHub
 
 Options:
   -p, --print                 non-interactive: run the prompt, print the result, exit
@@ -656,6 +657,14 @@ async function runGui(a: CliArgs): Promise<number> {
       }
     }
     if (!a.cwdSet) cwd = desktopProject();
+    // A verified update was downloaded earlier: install it now (the setup reopens FreeCode).
+    const { installMethod, pendingUpdate, runInstaller } = await import('./update/updater.js');
+    const pending = installMethod() === 'installer' ? pendingUpdate() : null;
+    if (pending) {
+      process.stdout.write(`FREECODE_UPDATING\nInstalling FreeCode ${pending.version}…\n`);
+      runInstaller(pending);
+      return 0;
+    }
   }
   process.stdout.write(`${theme.brand('✻ FreeCode')} ${c.dim(VERSION)} starting…\n`);
   const srv = await startServer({
@@ -668,6 +677,7 @@ async function runGui(a: CliArgs): Promise<number> {
     trusted: a.trust,
     overrides: overridesFrom(a),
     initialPrompt: a.prompt.join(' ').trim() || undefined,
+    updates: true,
   });
   const unregister = registerInstance({ pid: process.pid, port: srv.port, token: srv.token, version: VERSION, startedAt: Date.now() });
   let resolveExit: () => void = () => undefined;
@@ -717,6 +727,33 @@ async function runGui(a: CliArgs): Promise<number> {
   process.stdout.write(c.dim('Shutting down…\n'));
   unregister();
   await srv.close();
+  return 0;
+}
+
+async function cmdUpdate(): Promise<number> {
+  const { Updater } = await import('./update/updater.js');
+  const updater = new Updater(() => undefined);
+  const st = await updater.check(false);
+  if (st.status === 'error') {
+    console.error(`Could not check for updates: ${st.error}`);
+    return 1;
+  }
+  if (st.status !== 'available' && st.status !== 'ready') {
+    console.log(`${theme.success('✓')} FreeCode ${VERSION} is the latest version.`);
+    return 0;
+  }
+  console.log(`FreeCode ${st.latest!.version} is available (you have ${VERSION}).`);
+  if (st.method === 'installer') {
+    if (st.status !== 'ready') {
+      process.stdout.write('Downloading… ');
+      await updater.download();
+      console.log('done');
+    }
+    console.log('Installing. FreeCode will close and open again.');
+    updater.install();
+    return 0;
+  }
+  console.log(st.command ? `Update with:\n  ${st.command}` : `Download it from ${st.latest!.url}`);
   return 0;
 }
 
@@ -796,6 +833,8 @@ export async function main(argv: string[]): Promise<number> {
     case 'install-shortcut':
     case 'shortcut':
       return cmdShortcut(a.remove || a.commandArgs[0] === 'remove');
+    case 'update':
+      return cmdUpdate();
   }
   if (a.print || (!process.stdin.isTTY && (a.prompt.length || a.tui))) return runPrint(a);
   if (!a.tui) return runGui(a);

@@ -31,9 +31,13 @@ function splitRow(row) {
   return r.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
 }
 
+const SHELL_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'console', 'powershell', 'ps1', 'pwsh', 'cmd', 'bat', 'batch']);
+
 function codeBlock(code, lang) {
   const label = lang || 'code';
-  return `<div class="codeblock"><div class="cb-head"><span>${escapeHtml(label)}</span><button class="copy-btn" data-copy="1">${iconHtml('copy', 'svg-sm')}Copy</button></div><pre><code>${highlight(code, lang)}</code></pre></div>`;
+  // Shell snippets get a Run button (runs in the project folder; output shows in the chat).
+  const run = SHELL_LANGS.has(String(lang).toLowerCase()) && code.trim() && code.trim().split('\n').length <= 12 ? `<button class="copy-btn" data-run="1">${iconHtml('play', 'svg-sm')}Run</button>` : '';
+  return `<div class="codeblock"><div class="cb-head"><span>${escapeHtml(label)}</span><span class="cb-actions">${run}<button class="copy-btn" data-copy="1">${iconHtml('copy', 'svg-sm')}Copy</button></span></div><pre><code>${highlight(code, lang)}</code></pre></div>`;
 }
 
 export function renderMarkdown(src) {

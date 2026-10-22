@@ -189,6 +189,7 @@ const TABS = [
   { id: 'router', label: 'Router', icon: 'route' },
   { id: 'permissions', label: 'Permissions', icon: 'shield' },
   { id: 'general', label: 'General', icon: 'sliders' },
+  { id: 'skills', label: 'Skills', icon: 'package' },
   { id: 'mcp', label: 'MCP servers', icon: 'plug' },
   { id: 'about', label: 'About', icon: 'info' },
 ];
@@ -395,10 +396,13 @@ export function openSettings(ctx, tab = 'providers') {
         field('Command timeout (ms)', 'Default time limit for shell commands.', num('bashTimeoutMs', s.bashTimeoutMs)),
         field('Show model reasoning', 'Show "thinking" sections from reasoning models.', toggle(s.showReasoning, upd('showReasoning'))),
         field('Save conversations', 'Keep history so you can resume tasks later.', toggle(s.saveSessions, upd('saveSessions'))),
+        field('Update automatically', 'Download new versions from GitHub in the background and install them when you restart.', toggle(s.autoUpdate !== false, upd('autoUpdate'))),
         field('Web search engine', 'DuckDuckGo works without a key; Brave/Tavily give better results with a free key.', ws),
         field('Brave Search API key', null, brave),
         field('Tavily API key', null, tavily),
       );
+    } else if (id === 'skills') {
+      await skillsTab(body, ctx, () => current === 'skills' && show('skills'));
     } else if (id === 'mcp') {
       const list = st.mcp || [];
       clear(body).append(
@@ -436,11 +440,32 @@ export function openSettings(ctx, tab = 'providers') {
         if (!out.childNodes.length) out.append(h('div', { class: 'note warn' }, 'No providers with keys yet.'));
         doc.disabled = false;
       });
+      const checkBtn = h('button', { class: 'btn' }, icon('refresh', 'svg-sm'), 'Check for updates');
+      const updLine = h('span', { class: 'muted', style: { marginLeft: '10px' } });
+      const describe = (u) => {
+        if (!u) return '';
+        if (u.status === 'up-to-date') return `You have the latest version (${u.current}).`;
+        if (u.status === 'available') return `Version ${u.latest.version} is available${u.method === 'installer' ? '' : u.command ? ` - update with: ${u.command}` : ''}.`;
+        if (u.status === 'downloading') return `Downloading ${u.latest.version}…`;
+        if (u.status === 'ready') return `Version ${u.latest.version} is downloaded: use "Restart to update" in the sidebar.`;
+        if (u.status === 'error') return `Could not check: ${u.error}`;
+        if (u.status === 'checking') return 'Checking…';
+        return '';
+      };
+      checkBtn.addEventListener('click', async () => {
+        checkBtn.disabled = true;
+        updLine.textContent = 'Checking…';
+        const u = await api.post('/api/update/check').catch((e) => ({ status: 'error', error: e.message }));
+        updLine.textContent = describe(u);
+        checkBtn.disabled = false;
+      });
+      api.get('/api/update').then((u) => (updLine.textContent = describe(u))).catch(() => {});
       clear(body).append(
         h('div', { class: 'row', style: { gap: '14px', marginBottom: '14px' } }, h('div', { class: 'big-logo', style: { width: '48px', height: '48px', borderRadius: '13px', background: "url('/icon.svg') center/cover" } }), h('div', null, h('div', { style: { fontWeight: 700, fontSize: '18px' } }, 'FreeCode'), h('div', { class: 'muted' }, `Version ${st.version} · free AI coding agent`))),
         field('Project', st.project.root, h('span')),
         field('Session', st.session.id, h('span')),
         field('Configuration', 'Keys and settings are stored in ~/.freecode/config.json', h('span')),
+        field('Updates', 'New versions come from github.com/vortex907/freeaicodingtool releases.', h('div', { class: 'row' }, checkBtn, updLine)),
         field('Diagnostics', 'Checks that every saved API key works.', doc),
         out,
       );
@@ -532,3 +557,111 @@ export function openFolderPicker(ctx) {
 }
 
 export { escapeHtml };
+
+// ---------------------------------------------------------------- Skills
+
+const RECOMMENDED_SKILLS = new Set(['frontend-design', 'webapp-testing', 'pdf', 'docx', 'xlsx', 'pptx', 'mcp-builder', 'skill-creator']);
+
+async function skillsTab(body, ctx, rerender) {
+  const data = await api.get('/api/skills');
+  let source = data.marketplaces[0] || 'anthropics/skills';
+  const installedBox = h('div');
+  const drawInstalled = (list) => {
+    clear(installedBox);
+    if (!list.length) {
+      installedBox.append(h('div', { class: 'panel-empty' }, 'No skills yet. Install some from a marketplace below.'));
+      return;
+    }
+    for (const sk of list) {
+      const remove = h('button', { class: 'btn btn-ghost btn-sm' }, 'Remove');
+      remove.addEventListener('click', async () => {
+        if (!confirm(`Remove the "${sk.name}" skill?`)) return;
+        await api.post('/api/skills/remove', { name: sk.name });
+        ctx.toast(`Removed ${sk.name}`);
+        rerender();
+      });
+      const where = sk.from ? `from ${sk.from.source}` : sk.scope === 'project' ? 'this project' : sk.dir.includes('.claude') ? 'Claude skills folder' : 'your skills folder';
+      installedBox.append(
+        h(
+          'div',
+          { class: 'field skill-row' },
+          h('div', { class: 'f-main' }, h('div', { class: 'f-label' }, sk.name, h('span', { class: 'faint skill-where' }, where)), h('div', { class: 'f-desc' }, sk.description || 'No description')),
+          sk.from || (sk.scope === 'user' && !sk.dir.includes('.claude')) ? remove : null,
+        ),
+      );
+    }
+  };
+  drawInstalled(data.installed);
+
+  const sourceSel = h('select', { class: 'text-input', style: { flex: '0 1 260px' } }, data.marketplaces.map((m) => h('option', { value: m }, m)));
+  const search = h('input', { class: 'text-input', placeholder: 'Search skills…', style: { flex: 1 } });
+  const refresh = h('button', { class: 'btn btn-sm', title: 'Download the latest list' }, icon('refresh', 'svg-sm'), 'Refresh');
+  const list = h('div', { class: 'skill-market' }, h('div', { class: 'muted' }, 'Loading…'));
+  let catalog = null;
+  const drawCatalog = () => {
+    clear(list);
+    if (!catalog) return;
+    if (catalog.error) {
+      list.append(h('div', { class: 'note error' }, `Could not load ${catalog.source}: ${catalog.error}`));
+      return;
+    }
+    const q = search.value.trim().toLowerCase();
+    const items = catalog.skills.filter((sk) => !q || sk.name.toLowerCase().includes(q) || sk.description.toLowerCase().includes(q));
+    items.sort((a, b) => (RECOMMENDED_SKILLS.has(b.name) ? 1 : 0) - (RECOMMENDED_SKILLS.has(a.name) ? 1 : 0));
+    if (!items.length) list.append(h('div', { class: 'panel-empty' }, 'No skills found.'));
+    for (const sk of items) {
+      const btn = h('button', { class: `btn btn-sm ${sk.installed ? '' : 'btn-primary'}` }, sk.installed ? 'Reinstall' : 'Install');
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.textContent = 'Installing…';
+        const r = await api.post('/api/skills/install', { source: catalog.source, path: sk.path }).catch((e) => ({ ok: false, error: e.message }));
+        if (r.ok) {
+          ctx.toast(`Installed the ${r.name} skill`);
+          rerender();
+        } else {
+          ctx.toast(r.error || 'Install failed', 'err');
+          btn.disabled = false;
+          btn.textContent = 'Install';
+        }
+      });
+      list.append(
+        h(
+          'div',
+          { class: 'skill-card' },
+          h('div', { class: 'skill-top' }, h('span', { class: 'skill-name' }, sk.name), RECOMMENDED_SKILLS.has(sk.name) ? h('span', { class: 'badge ok' }, 'Recommended') : null, sk.installed ? h('span', { class: 'badge off' }, 'Installed') : null, h('span', { class: 'grow' }), btn),
+          h('div', { class: 'f-desc' }, sk.description || ''),
+        ),
+      );
+    }
+  };
+  const load = async (force) => {
+    clear(list).append(h('div', { class: 'muted' }, `Loading ${source}…`));
+    catalog = await api.get(`/api/skills/catalog?source=${encodeURIComponent(source)}${force ? '&refresh=1' : ''}`).catch((e) => ({ source, skills: [], error: e.message }));
+    drawCatalog();
+  };
+  sourceSel.addEventListener('change', () => {
+    source = sourceSel.value;
+    load(false);
+  });
+  search.addEventListener('input', drawCatalog);
+  refresh.addEventListener('click', () => load(true));
+
+  const addInput = h('input', { class: 'text-input', placeholder: 'owner/repo or GitHub link', style: { flex: 1 } });
+  const addBtn = h('button', { class: 'btn btn-sm' }, icon('plus', 'svg-sm'), 'Add marketplace');
+  addBtn.addEventListener('click', async () => {
+    const r = await api.post('/api/skills/marketplaces', { add: addInput.value.trim() });
+    if (!r.ok) return ctx.toast(r.error, 'err');
+    rerender();
+  });
+
+  clear(body).append(
+    h('p', { class: 'muted', style: { marginTop: 0 } }, 'Skills are expert playbooks the agent loads when a task matches (documents, design, testing…). They use the same SKILL.md format as Claude, so skills from Claude marketplaces work here, and skills in ~/.claude/skills are picked up too.'),
+    h('div', { class: 'panel-section-title', style: { marginTop: '6px' } }, 'Installed'),
+    installedBox,
+    h('div', { class: 'panel-section-title', style: { marginTop: '22px' } }, 'Marketplace'),
+    h('div', { class: 'row', style: { gap: '8px', marginBottom: '10px' } }, sourceSel, search, refresh),
+    list,
+    h('div', { class: 'row', style: { gap: '8px', marginTop: '14px' } }, addInput, addBtn),
+  );
+  load(false);
+}

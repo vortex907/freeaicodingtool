@@ -12,6 +12,11 @@ import type { PermissionMode, Settings } from '../config/config.js';
 import { openInBrowser } from '../ui/setup.js';
 import { debug } from '../util/log.js';
 import { VERSION } from '../version.js';
+import { detectRunCommand, openIn, openTargets, runInTerminal } from './launchers.js';
+import { readGlobalConfig, updateGlobalConfig, updateProjectSettings } from '../config/config.js';
+import { clearSkillsCache, loadSkills } from '../skills/skills.js';
+import { DEFAULT_MARKETPLACES, fetchCatalog, installSkill, installedFrom, parseSource, removeSkill } from '../skills/marketplace.js';
+import { Updater } from '../update/updater.js';
 
 export interface ServerOptions {
   cwd: string;
@@ -23,6 +28,8 @@ export interface ServerOptions {
   trusted?: boolean;
   overrides?: Partial<Settings>;
   initialPrompt?: string;
+  /** Check GitHub for new versions while the app runs. */
+  updates?: boolean;
 }
 
 const MIME: Record<string, string> = {
@@ -104,6 +111,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   await controller.open(opts.cwd, tc.needsTrust ? (opts.trusted ?? false) : opts.trusted);
   let pendingTrust: string | null = tc.needsTrust && !opts.trusted ? tc.root : null;
   controller.initialPrompt = opts.initialPrompt;
+  const updater = new Updater((state) => broadcast({ type: 'update', state }));
+  if (opts.updates) updater.start(() => readGlobalConfig().autoUpdate !== false);
   const root = webRoot();
   let port = 0;
 
@@ -229,6 +238,89 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           pendingTrust = null;
           return json(res, 200, r);
         }
+        case 'GET /api/update':
+          return json(res, 200, updater.state);
+        case 'POST /api/update/check':
+          return json(res, 200, await updater.check(readGlobalConfig().autoUpdate !== false));
+        case 'POST /api/update/download':
+          try {
+            await updater.download();
+            return json(res, 200, { ok: true, state: updater.state });
+          } catch (e) {
+            return json(res, 200, { ok: false, error: (e as Error).message });
+          }
+        case 'POST /api/update/install': {
+          if (controller.busy) return json(res, 200, { ok: false, error: 'Stop the current task first.' });
+          if (updater.state.status !== 'ready') return json(res, 200, { ok: false, error: 'No downloaded update yet.' });
+          json(res, 200, { ok: true });
+          // Let the page show "Updating…", then hand over to the setup (it reopens FreeCode).
+          setTimeout(() => {
+            process.stdout.write('FREECODE_UPDATING\n');
+            if (updater.install()) setTimeout(() => process.exit(0), 400);
+          }, 300);
+          return;
+        }
+        case 'GET /api/skills': {
+          const marketplaces = readGlobalConfig().skills?.marketplaces ?? DEFAULT_MARKETPLACES;
+          const installed = loadSkills(controller.app.projectRoot).map((sk) => ({ ...sk, from: installedFrom(sk.dir) }));
+          return json(res, 200, { installed, marketplaces });
+        }
+        case 'GET /api/skills/catalog': {
+          const source = url.searchParams.get('source') ?? DEFAULT_MARKETPLACES[0]!;
+          try {
+            const cat = await fetchCatalog(source, url.searchParams.get('refresh') === '1');
+            const have = new Set(loadSkills(controller.app.projectRoot).map((sk) => sk.name.toLowerCase()));
+            return json(res, 200, { ...cat, skills: cat.skills.map((sk) => ({ ...sk, installed: have.has(sk.name.toLowerCase()) })) });
+          } catch (e) {
+            return json(res, 200, { source, skills: [], error: (e as Error).message });
+          }
+        }
+        case 'POST /api/skills/install': {
+          try {
+            const r = await installSkill(s('source'), s('path'));
+            clearSkillsCache();
+            return json(res, 200, { ok: true, ...r });
+          } catch (e) {
+            return json(res, 200, { ok: false, error: (e as Error).message });
+          }
+        }
+        case 'POST /api/skills/remove': {
+          const ok = removeSkill(s('name'));
+          clearSkillsCache();
+          return json(res, 200, { ok });
+        }
+        case 'POST /api/skills/marketplaces': {
+          const add = s('add').trim();
+          const remove = s('remove').trim();
+          if (add && !parseSource(add)) return json(res, 200, { ok: false, error: 'Use owner/repo or a github.com link' });
+          const cfg = updateGlobalConfig((g) => {
+            const list = g.skills?.marketplaces ?? [...DEFAULT_MARKETPLACES];
+            const next = list.filter((m) => m !== remove);
+            if (add && !next.includes(add)) next.push(add);
+            g.skills = { ...(g.skills ?? {}), marketplaces: next };
+          });
+          return json(res, 200, { ok: true, marketplaces: cfg.skills?.marketplaces ?? [] });
+        }
+        case 'GET /api/launch': {
+          const root = controller.app.projectRoot;
+          const saved = controller.app.settings.runCommand;
+          const detected = detectRunCommand(root);
+          return json(res, 200, { targets: openTargets(root), run: saved ? { command: saved, source: 'saved' } : detected ? { command: detected, source: 'detected' } : null });
+        }
+        case 'POST /api/launch/open':
+          return json(res, 200, await openIn(s('target'), controller.app.projectRoot));
+        case 'POST /api/launch/run': {
+          const root = controller.app.projectRoot;
+          const command = s('command').trim() || controller.app.settings.runCommand || detectRunCommand(root) || '';
+          if (!command) return json(res, 200, { ok: false, error: 'no-command' });
+          if (body.save === true) {
+            updateProjectSettings(root, (cfg) => {
+              cfg.runCommand = command;
+            });
+            controller.app.settings.runCommand = command;
+          }
+          return json(res, 200, { ...runInTerminal(command, root), command });
+        }
         case 'POST /api/open': {
           const u = s('url');
           if (/^https?:\/\//.test(u)) openInBrowser(u);
@@ -275,6 +367,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     controller,
     clientCount: () => clients.size,
     close: async () => {
+      updater.stop();
       for (const c of clients) {
         try {
           c.end();

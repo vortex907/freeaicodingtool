@@ -130,6 +130,12 @@ export interface Settings {
   trustedFolders: string[];
   /** Set after the first-run setup screen was completed. Global only. */
   setupCompleted?: boolean;
+  /** Download and install new versions from GitHub automatically (default true). */
+  autoUpdate?: boolean;
+  /** How to start this project (the app's Run button). */
+  runCommand?: string;
+  /** Skills marketplaces: GitHub repositories ("owner/repo") with SKILL.md folders. */
+  skills?: { marketplaces?: string[] };
 }
 
 export function defaultSettings(): Settings {

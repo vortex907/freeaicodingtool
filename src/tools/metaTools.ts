@@ -1,5 +1,5 @@
-// TodoWrite, Task (sub-agents), ExitPlanMode and AskUser tools.
-import type { PreparedCall, Todo, Tool } from './types.js';
+// TodoWrite, Task (sub-agents), ExitPlanMode and AskUserQuestion tools.
+import type { PreparedCall, QuestionAnswer, QuestionOption, Todo, Tool, UserQuestion } from './types.js';
 import { errorResult, ok, strParam } from './types.js';
 import { truncate } from '../util/strings.js';
 
@@ -149,32 +149,101 @@ export const ExitPlanModeTool: Tool = {
   },
 };
 
+/** Accepts both the structured shape and the older {question, options: string[]} one. */
+export function normalizeQuestions(input: Record<string, unknown>): UserQuestion[] {
+  const toOption = (o: unknown): QuestionOption | null => {
+    if (typeof o === 'string') return o.trim() ? { label: o.trim() } : null;
+    if (o && typeof o === 'object') {
+      const r = o as Record<string, unknown>;
+      const label = String(r.label ?? r.title ?? r.value ?? r.name ?? '').trim();
+      const description = typeof r.description === 'string' && r.description.trim() ? r.description.trim() : undefined;
+      return label ? { label, description } : null;
+    }
+    return null;
+  };
+  const toQuestion = (q: unknown): UserQuestion | null => {
+    if (typeof q === 'string') return q.trim() ? { question: q.trim(), options: [] } : null;
+    if (!q || typeof q !== 'object') return null;
+    const r = q as Record<string, unknown>;
+    const question = String(r.question ?? r.q ?? r.text ?? r.prompt ?? '').trim();
+    if (!question) return null;
+    const seen = new Set<string>();
+    const options = (Array.isArray(r.options) ? r.options : Array.isArray(r.choices) ? r.choices : [])
+      .map(toOption)
+      .filter((o): o is QuestionOption => !!o && !seen.has(o.label.toLowerCase()) && !!seen.add(o.label.toLowerCase()))
+      .slice(0, 6);
+    const header = typeof r.header === 'string' && r.header.trim() ? r.header.trim().slice(0, 24) : undefined;
+    return { question, header, options, multiSelect: r.multiSelect === true || r.multi_select === true || r.multiple === true };
+  };
+  let list: unknown[] = [];
+  if (Array.isArray(input.questions)) list = input.questions;
+  else if (input.question || input.q || input.prompt) list = [{ question: input.question ?? input.q ?? input.prompt, options: input.options ?? input.choices, header: input.header, multiSelect: input.multiSelect }];
+  return list.map(toQuestion).filter((q): q is UserQuestion => !!q).slice(0, 4);
+}
+
+export function formatAnswers(answers: QuestionAnswer[]): string {
+  const lines = answers.map((a, i) => {
+    const parts = [...a.selected];
+    if (a.other) parts.push(a.selected.length ? `also: "${a.other}"` : `"${a.other}"`);
+    return `${i + 1}. ${a.header ?? a.question} -> ${parts.length ? parts.join(', ') : '(no answer)'}`;
+  });
+  return `The user answered:\n${lines.join('\n')}\nFollow these answers.`;
+}
+
 export const AskUserTool: Tool = {
-  name: 'AskUser',
+  name: 'AskUserQuestion',
   category: 'meta',
   planSafe: true,
   description:
-    'Ask the user a clarifying question when the request is ambiguous and a wrong guess would waste significant work. Optionally give 2-4 answer options. ' +
-    'Do not use it for things you can find out yourself by reading the code.',
+    'Ask the user 1-4 multiple-choice questions when you need a decision only they can make (requirements, preferences, trade-offs) and a wrong guess would waste work. ' +
+    'Each question gets 2-4 concrete options with a one-line description; the user can always type their own answer instead. ' +
+    'Put the option you recommend first and add " (Recommended)" to its label. Ask everything you need in ONE call. ' +
+    'Never ask open-ended questions like "what do you want me to do?", and never ask what you can find out yourself from the code or the web: decide those and move on.',
   parameters: {
     type: 'object',
     properties: {
-      question: { type: 'string', description: 'The question to ask' },
-      options: { type: 'array', items: { type: 'string' }, description: 'Optional list of suggested answers' },
+      questions: {
+        type: 'array',
+        description: '1-4 questions',
+        items: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'The complete question, e.g. "Which UI framework should the calculator use?"' },
+            header: { type: 'string', description: 'Very short label shown as a chip (max 12 characters), e.g. "Framework"' },
+            options: {
+              type: 'array',
+              description: '2-4 distinct choices',
+              items: {
+                type: 'object',
+                properties: {
+                  label: { type: 'string', description: 'The choice in 1-5 words' },
+                  description: { type: 'string', description: 'What it means or its trade-off, in one sentence' },
+                },
+                required: ['label'],
+              },
+            },
+            multiSelect: { type: 'boolean', description: 'true if several options can be chosen together' },
+          },
+          required: ['question', 'options'],
+        },
+      },
     },
-    required: ['question'],
+    required: ['questions'],
   },
-  label: (input) => `AskUser(${truncate(strParam(input, 'question') ?? '?', 70)})`,
+  label: (input) => {
+    const qs = normalizeQuestions(input);
+    return `AskUserQuestion(${truncate(qs[0]?.header ?? qs[0]?.question ?? '?', 60)}${qs.length > 1 ? ` +${qs.length - 1}` : ''})`;
+  },
   async prepare(input, ctx) {
-    const question = strParam(input, 'question', 'q', 'prompt');
-    if (!question) return errorResult('Missing required parameter: question');
-    const options = Array.isArray(input.options) ? (input.options as unknown[]).map(String).filter(Boolean).slice(0, 6) : undefined;
+    const questions = normalizeQuestions(input);
+    if (!questions.length) return errorResult('Missing required parameter: questions (each with a question and 2-4 options)');
     return {
       execute: async () => {
-        if (!ctx.services.askUser) return ok('The user is not available to answer (non-interactive run). Make a sensible assumption, state it, and continue.');
-        const answer = await ctx.services.askUser(question, options);
-        if (answer === null) return ok('The user dismissed the question without answering. Make a sensible assumption, state it, and continue.');
-        return ok(`User answered: ${answer}`, { kind: 'summary', text: `Answer: ${truncate(answer, 80)}` });
+        if (!ctx.services.askUser) return ok('The user is not available to answer (non-interactive run). Pick the most sensible option, say which one you chose, and continue.');
+        const answers = await ctx.services.askUser(questions);
+        if (answers === null) return ok('The user skipped the question. Pick the most sensible option, say which one you chose, and continue.');
+        const short = answers.map((a) => [...a.selected, ...(a.other ? [a.other] : [])].join(', ')).join(' · ');
+        return ok(formatAnswers(answers), { kind: 'summary', text: `Answer: ${truncate(short, 90)}` });
       },
     };
   },

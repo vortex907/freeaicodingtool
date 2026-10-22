@@ -99,3 +99,55 @@ test('provider errors are shortened to one readable line', () => {
   assert.equal(shortError('NVIDIA NIM/qwen: {"error":{"message":"Model is overloaded. Please retry later."}}'), 'Model is overloaded');
   assert.equal(shortError(''), 'unknown error');
 });
+
+test('keyless search fallbacks parse their result pages', async () => {
+  const { parseDuckDuckGoLite, parseMojeek } = await import('../src/tools/webTools.js');
+  const lite = `<table><tr><td valign="top">1.&nbsp;</td><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.counter-strike.net%2Fnews%2Fupdates&amp;rut=abc" class='result-link'>Counter-Strike 2 &amp; Updates</a></td></tr>
+<tr><td>&nbsp;</td><td class='result-snippet'>Release notes for the <b>latest</b> CS2 update.</td></tr></table>`;
+  assert.deepEqual(parseDuckDuckGoLite(lite, 5), [{ title: 'Counter-Strike 2 & Updates', url: 'https://www.counter-strike.net/news/updates', snippet: 'Release notes for the latest CS2 update.' }]);
+  const mojeek = `<ul class="results-standard"><li class="r1"><a class="ob" href="https://store.steampowered.com/news/app/730">x</a><h2><a class="title" href="https://store.steampowered.com/news/app/730">Counter-Strike 2 News</a></h2><p class="i">store.steampowered.com</p><p class="s">Patch notes from Valve.</p></li></ul>`;
+  assert.deepEqual(parseMojeek(mojeek, 5), [{ title: 'Counter-Strike 2 News', url: 'https://store.steampowered.com/news/app/730', snippet: 'Patch notes from Valve.' }]);
+});
+
+test('skills: front matter (plain, quoted and folded) is parsed', async () => {
+  const { parseFrontMatter } = await import('../src/skills/skills.js');
+  const r = parseFrontMatter('---\nname: pdf\ndescription: >\n  Work with PDF files.\n  Use for forms.\nlicense: "MIT"\n---\n# Body\n');
+  assert.deepEqual(r.data, { name: 'pdf', description: 'Work with PDF files. Use for forms.', license: 'MIT' });
+  assert.equal(r.body, '# Body\n');
+});
+
+test('tar reader handles GitHub-style tarballs with long names', async () => {
+  const { gzipSync } = await import('node:zlib');
+  const { readTar } = await import('../src/util/tar.js');
+  const header = (name: string, size: number, type = '0') => {
+    const h = Buffer.alloc(512);
+    h.write(name.slice(0, 100), 0);
+    h.write(size.toString(8).padStart(11, '0'), 124);
+    h.write(type, 156);
+    h.write('ustar', 257);
+    return h;
+  };
+  const pad = (b: Buffer) => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
+  const longName = `repo-abc/skills/${'x'.repeat(120)}/SKILL.md`;
+  const body = Buffer.from('---\nname: x\n---\nhi');
+  const tar = Buffer.concat([
+    header('repo-abc/', 0, '5'),
+    header('././@LongLink', longName.length, 'L'),
+    pad(Buffer.from(longName)),
+    header('ignored', body.length),
+    pad(body),
+    Buffer.alloc(1024),
+  ]);
+  const entries = readTar(gzipSync(tar));
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.path, longName);
+  assert.equal(entries[0]!.data.toString(), body.toString());
+});
+
+test('marketplace sources accept owner/repo, @ref and GitHub links', async () => {
+  const { parseSource } = await import('../src/skills/marketplace.js');
+  assert.deepEqual(parseSource('anthropics/skills'), { owner: 'anthropics', repo: 'skills', ref: 'HEAD' });
+  assert.deepEqual(parseSource('me/my-skills@dev'), { owner: 'me', repo: 'my-skills', ref: 'dev' });
+  assert.deepEqual(parseSource('https://github.com/a/b/tree/main'), { owner: 'a', repo: 'b', ref: 'main' });
+  assert.equal(parseSource('not a repo'), null);
+});

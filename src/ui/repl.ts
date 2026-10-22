@@ -11,7 +11,7 @@ import { builtinCommands, runSlashCommand, type ReplApi } from './commands.js';
 import { mentionCompletions, expandMentions, projectFileList } from './mentions.js';
 import { needsFirstRunSetup, runSetupWizard } from './setup.js';
 import type { AgentEvent, PermissionAnswer } from '../agent/agent.js';
-import type { PermissionRequest, ToolResult } from '../tools/types.js';
+import type { PermissionRequest, ToolResult, UserQuestion, QuestionAnswer } from '../tools/types.js';
 import type { PermissionMode } from '../config/config.js';
 import { isTrustedFolder, loadConfig, projectHasRiskySettings, updateGlobalConfig } from '../config/config.js';
 import { MODE_CYCLE, modeLabel } from '../permissions/permissions.js';
@@ -110,7 +110,7 @@ export class Repl implements ReplApi {
       await this.app.init({
         onEvent: (e) => this.onEvent(e),
         askPermission: (req, meta) => this.askPermission(req, meta),
-        askUser: (q, o) => this.askUser(q, o),
+        askUser: (qs) => this.askUser(qs),
         approvePlan: (plan) => this.approvePlan(plan),
       });
       this.editor.history = loadHistory(this.app.projectRoot);
@@ -688,16 +688,35 @@ export class Repl implements ReplApi {
     return { allow: false, feedback: feedback || undefined };
   }
 
-  private async askUser(question: string, options?: string[]): Promise<string | null> {
+  private async askUser(questions: UserQuestion[]): Promise<QuestionAnswer[] | null> {
     this.endStream();
-    let answer: string | null;
-    if (options?.length) {
-      const opts: SelectOption<string>[] = options.map((o) => ({ label: o, value: o }));
-      opts.push({ label: 'Type a different answer…', value: '__other' });
-      answer = await this.host.showWidget(new SelectList([theme.info(c.bold('? ') + question)], opts));
-      if (answer === '__other') answer = await this.host.showWidget(new TextPrompt([theme.info(question)], { prompt: '  > ' }));
-    } else answer = await this.host.showWidget(new TextPrompt([theme.info(c.bold('? ') + question)], { prompt: '  > ' }));
-    return answer;
+    const answers: QuestionAnswer[] = [];
+    for (const q of questions) {
+      const base = { question: q.question, header: q.header };
+      const title = [theme.info(c.bold('? ') + (q.header ? c.dim(`[${q.header}] `) : '') + q.question)];
+      if (!q.options.length) {
+        const t = await this.host.showWidget(new TextPrompt(title, { prompt: '  > ' }));
+        if (t === null) return null;
+        answers.push({ ...base, selected: [], other: t });
+      } else if (q.multiSelect) {
+        const lines = [...title, ...q.options.map((o, i) => `  ${i + 1}. ${o.label}${o.description ? c.dim(` - ${o.description}`) : ''}`), c.dim('  Type the numbers you want (e.g. 1,3), or your own answer:')];
+        const t = await this.host.showWidget(new TextPrompt(lines, { prompt: '  > ' }));
+        if (t === null) return null;
+        const nums = /^[\d,\s]+$/.test(t) ? [...new Set(t.split(/[,\s]+/).map(Number))].filter((n) => n >= 1 && n <= q.options.length) : [];
+        answers.push(nums.length ? { ...base, selected: nums.map((n) => q.options[n - 1]!.label) } : { ...base, selected: [], other: t });
+      } else {
+        const opts: SelectOption<string>[] = q.options.map((o) => ({ label: o.description ? `${o.label}  ${c.dim(o.description)}` : o.label, value: o.label }));
+        opts.push({ label: 'Type something else…', value: '__other' });
+        const v = await this.host.showWidget(new SelectList(title, opts));
+        if (v === null) return null;
+        if (v === '__other') {
+          const t = await this.host.showWidget(new TextPrompt([theme.info(q.question)], { prompt: '  > ' }));
+          if (t === null) return null;
+          answers.push({ ...base, selected: [], other: t });
+        } else answers.push({ ...base, selected: [v] });
+      }
+    }
+    return answers;
   }
 
   private async approvePlan(plan: string): Promise<'acceptEdits' | 'default' | null> {

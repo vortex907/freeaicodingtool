@@ -99,11 +99,34 @@ export interface SubagentRequest {
   parentToolCallId: string;
 }
 
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** A multiple-choice question for the user (the user can always type their own answer). */
+export interface UserQuestion {
+  question: string;
+  /** Very short chip label, e.g. "Framework". */
+  header?: string;
+  options: QuestionOption[];
+  multiSelect?: boolean;
+}
+
+export interface QuestionAnswer {
+  question: string;
+  header?: string;
+  /** Labels of the chosen options. */
+  selected: string[];
+  /** Free-text answer typed instead of (or in addition to) the options. */
+  other?: string;
+}
+
 export interface ToolServices {
   /** Report live progress (e.g. tail of a running command). */
   progress: (text: string) => void;
-  /** Ask the human a question (undefined in non-interactive mode). */
-  askUser?: (question: string, options?: string[]) => Promise<string | null>;
+  /** Ask the human multiple-choice questions (undefined in non-interactive mode). Null = dismissed. */
+  askUser?: (questions: UserQuestion[]) => Promise<QuestionAnswer[] | null>;
   /** Present a plan for approval (plan mode). Returns the chosen mode or null to keep planning. */
   approvePlan?: (plan: string) => Promise<'acceptEdits' | 'default' | null>;
   /** Run a sub-agent (Task tool). */

@@ -1,5 +1,6 @@
 // Application core shared by the interactive REPL and print mode: config, providers, router, agent.
 import * as path from 'node:path';
+import { loadSkillsCached, skillsPromptSection } from './skills/skills.js';
 import { type LoadedConfig, type PermissionMode, type Settings, loadConfig } from './config/config.js';
 import { buildProviders, loadDiscoveryCache } from './providers/registry.js';
 import { refreshDiscovery, type DiscoveryReport } from './providers/discovery.js';
@@ -161,6 +162,7 @@ export class App {
         memory: this.memory,
         depth: ctx.depth,
         mcpInstructions: this.mcp.instructions(),
+        skillsSection: skillsPromptSection(loadSkillsCached(this.projectRoot)),
       },
       this.envCache.text,
     );

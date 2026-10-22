@@ -135,7 +135,7 @@ export const WebFetchTool: Tool = {
   },
 };
 
-interface SearchResult {
+export interface SearchResult {
   title: string;
   url: string;
   snippet: string;
@@ -163,6 +163,58 @@ async function searchDuckDuckGo(query: string, n: number, signal: AbortSignal): 
     if (href.startsWith('//')) href = 'https:' + href;
     if (/duckduckgo\.com\/y\.js|ad_provider|ad_domain/.test(href)) continue; // ads
     results.push({ title: stripTags(m[2]!), url: href, snippet: stripTags(m[3] ?? m[4] ?? '') });
+  }
+  return results;
+}
+
+function attr(tag: string, name: string): string | undefined {
+  const m = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i').exec(tag);
+  return m ? decodeEntities(m[1] ?? m[2] ?? '') : undefined;
+}
+
+/** DuckDuckGo's no-JavaScript "lite" page: a different endpoint that often works when html/ is limited. */
+async function searchDuckDuckGoLite(query: string, n: number, signal: AbortSignal): Promise<SearchResult[]> {
+  const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, { headers: { 'User-Agent': UA, Accept: 'text/html' }, signal });
+  if (!res.ok) throw new Error(`DuckDuckGo Lite HTTP ${res.status}`);
+  return parseDuckDuckGoLite(await res.text(), n);
+}
+
+export function parseDuckDuckGoLite(html: string, n: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  const linkRe = /<a\b[^>]*class=['"][^'"]*result-link[^'"]*['"][^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = linkRe.exec(html)) && results.length < n) {
+    const tag = m[0].slice(0, m[0].indexOf('>') + 1);
+    let href = attr(tag, 'href') ?? '';
+    const uddg = /[?&]uddg=([^&]+)/.exec(href);
+    if (uddg) href = decodeURIComponent(uddg[1]!);
+    if (href.startsWith('//')) href = 'https:' + href;
+    if (!/^https?:/.test(href) || /duckduckgo\.com\/y\.js/.test(href)) continue;
+    const after = html.slice(linkRe.lastIndex, linkRe.lastIndex + 3000);
+    const snippet = /class=['"][^'"]*result-snippet[^'"]*['"][^>]*>([\s\S]*?)<\/td>/i.exec(after)?.[1] ?? '';
+    results.push({ title: stripTags(m[1]!), url: href, snippet: stripTags(snippet) });
+  }
+  return results;
+}
+
+/** Mojeek: an independent search engine with plain HTML results. */
+async function searchMojeek(query: string, n: number, signal: AbortSignal): Promise<SearchResult[]> {
+  const res = await fetch(`https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, { headers: { 'User-Agent': UA, Accept: 'text/html', 'Accept-Language': 'en-US,en;q=0.8' }, signal });
+  if (!res.ok) throw new Error(`Mojeek HTTP ${res.status}`);
+  return parseMojeek(await res.text(), n);
+}
+
+export function parseMojeek(html: string, n: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  const titleRe = /<a\b[^>]*class=["'][^"']*\btitle\b[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = titleRe.exec(html)) && results.length < n) {
+    const tag = m[0].slice(0, m[0].indexOf('>') + 1);
+    const href = attr(tag, 'href') ?? '';
+    if (!/^https?:/.test(href)) continue;
+    const after = html.slice(titleRe.lastIndex, titleRe.lastIndex + 3000);
+    const snippet = /<p\b[^>]*class=["']s["'][^>]*>([\s\S]*?)<\/p>/i.exec(after)?.[1] ?? '';
+    results.push({ title: stripTags(m[1]!), url: href, snippet: stripTags(snippet) });
   }
   return results;
 }
@@ -228,7 +280,9 @@ export const WebSearchTool: Tool = {
   category: 'network',
   parallelSafe: true,
   planSafe: true,
-  description: 'Search the web and return a list of results (title, URL, snippet). Use it for current information, docs, error messages, library versions. Follow up with WebFetch to read a result.',
+  description:
+    'Search the web and return results (title, URL, snippet). Use it whenever the answer may have changed since your training: latest versions and releases, game/app updates, news, prices, ' +
+    'current docs and APIs, error messages. Include the year in queries about recent things. Then read the best results with WebFetch before answering.',
   parameters: {
     type: 'object',
     properties: {
@@ -259,8 +313,11 @@ export const WebSearchTool: Tool = {
         if ((p === 'brave' || p === 'auto') && brave) attempts.push(['Brave', () => searchBrave(query, n + 5, brave, signal)]);
         if ((p === 'tavily' || p === 'auto') && tavily) attempts.push(['Tavily', () => searchTavily(query, n + 5, tavily, signal)]);
         if ((p === 'searxng' || p === 'auto') && searx) attempts.push(['SearXNG', () => searchSearxng(query, n + 5, searx, signal)]);
+        // No key needed: several engines in turn, since any of them may rate limit or show a captcha.
         attempts.push(['DuckDuckGo', () => searchDuckDuckGo(query, n + 5, signal)]);
+        attempts.push(['DuckDuckGo Lite', () => searchDuckDuckGoLite(query, n + 5, signal)]);
         attempts.push(['Bing', () => searchBing(query, n + 5, signal)]);
+        attempts.push(['Mojeek', () => searchMojeek(query, n + 5, signal)]);
         const errors: string[] = [];
         for (const [name, run] of attempts) {
           try {

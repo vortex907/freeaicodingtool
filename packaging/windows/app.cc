@@ -32,6 +32,7 @@ HWND g_hwnd = nullptr;
 WNDPROC g_prevProc = nullptr;
 volatile LONG g_generation = 0;  // bumped on every (re)start so old reader threads stay quiet
 volatile LONG g_closing = 0;
+volatile LONG g_updating = 0;  // the engine is handing over to the setup of a new version
 
 struct Server {
   HANDLE process = nullptr;
@@ -264,25 +265,27 @@ struct ReaderArgs {
 DWORD WINAPI ReadServerOutput(LPVOID param) {
   std::unique_ptr<ReaderArgs> args(static_cast<ReaderArgs *>(param));
   std::string buf;
-  bool ready = false;
   char chunk[4096];
   DWORD n = 0;
+  // Keep reading (and draining) so the server never blocks on a full pipe.
   while (ReadFile(args->pipe, chunk, sizeof chunk, &n, nullptr) && n > 0) {
-    if (ready) continue;  // keep draining so the server never blocks on a full pipe
     buf.append(chunk, n);
     size_t nl;
     while ((nl = buf.find('\n')) != std::string::npos) {
       std::string line = buf.substr(0, nl);
       buf.erase(0, nl + 1);
       if (!line.empty() && line.back() == '\r') line.pop_back();
+      LONG gen = args->generation;
       if (line.rfind("FREECODE_READY ", 0) == 0) {
         std::string url = line.substr(15);
-        LONG gen = args->generation;
-        ready = true;
         g_view->dispatch([url, gen] {
           if (gen == g_generation) g_view->navigate(url);
         });
-        break;
+      } else if (line == "FREECODE_UPDATING") {
+        InterlockedExchange(&g_updating, 1);
+        g_view->dispatch([gen] {
+          if (gen == g_generation) g_view->set_html(Page(SavedThemeIsDark(), "<h1>Updating FreeCode</h1><p class='pulse'>Installing the new version. FreeCode opens again in a moment&hellip;</p>"));
+        });
       }
     }
     if (buf.size() > 65536) buf.erase(0, buf.size() - 4096);
@@ -290,7 +293,7 @@ DWORD WINAPI ReadServerOutput(LPVOID param) {
   CloseHandle(args->pipe);
   LONG gen = args->generation;
   g_view->dispatch([gen] {
-    if (gen == g_generation) ShowStopped();
+    if (gen == g_generation && !g_updating) ShowStopped();
   });
   return 0;
 }

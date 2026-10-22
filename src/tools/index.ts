@@ -5,6 +5,7 @@ import { BashOutputTool, BashTool, KillShellTool } from './bash.js';
 import { GlobTool, GrepTool, LSTool } from './searchTools.js';
 import { WebFetchTool, WebSearchTool } from './webTools.js';
 import { AskUserTool, ExitPlanModeTool, TaskTool, TodoWriteTool } from './metaTools.js';
+import { SkillTool } from './skillTool.js';
 
 export const BUILTIN_TOOLS: Tool[] = [
   ReadTool,
@@ -22,6 +23,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   TodoWriteTool,
   TaskTool,
   AskUserTool,
+  SkillTool,
   ExitPlanModeTool,
 ];
 
@@ -34,6 +36,8 @@ export interface ToolSetOptions {
   extra?: Tool[];
   disallowed?: string[];
   interactive: boolean;
+  /** Offer the Skill tool (only when skills are installed). */
+  hasSkills?: boolean;
 }
 
 /** Tools offered to the model for one request. */
@@ -46,7 +50,8 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   } else {
     if (!opts.planMode) tools = tools.filter((t) => t.name !== 'ExitPlanMode');
   }
-  if (!opts.interactive) tools = tools.filter((t) => t.name !== 'AskUser');
+  if (!opts.interactive) tools = tools.filter((t) => t.name !== 'AskUserQuestion');
+  if (!opts.hasSkills) tools = tools.filter((t) => t.name !== 'Skill');
   if (opts.disallowed?.length) {
     const deny = new Set(opts.disallowed.map((d) => d.replace(/\(.*$/, '')));
     tools = tools.filter((t) => !deny.has(t.name));
@@ -103,8 +108,11 @@ const ALIASES: Record<string, string> = {
   update_todos: 'TodoWrite',
   task: 'Task',
   agent: 'Task',
-  ask_user: 'AskUser',
-  ask_followup_question: 'AskUser',
+  ask_user: 'AskUserQuestion',
+  askuser: 'AskUserQuestion',
+  ask_user_question: 'AskUserQuestion',
+  ask_followup_question: 'AskUserQuestion',
+  ask: 'AskUserQuestion',
   exit_plan_mode: 'ExitPlanMode',
 };
 

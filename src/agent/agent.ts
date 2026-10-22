@@ -6,9 +6,10 @@ import { type Candidate, type Router, AllModelsUnavailableError } from '../route
 import type { TaskProfile } from '../router/classifier.js';
 import { ProviderError } from '../providers/errors.js';
 import { mightContainToolCall, newToolCallId, parseToolCallsFromText } from '../providers/textTools.js';
-import type { PermissionRequest, SessionState, Tool, ToolContext, ToolResult, ToolServices, Todo } from '../tools/types.js';
+import type { PermissionRequest, SessionState, Tool, ToolContext, ToolResult, ToolServices, Todo, UserQuestion, QuestionAnswer } from '../tools/types.js';
 import { toolSchema } from '../tools/types.js';
 import { aliasOf, findTool, selectTools } from '../tools/index.js';
+import { loadSkillsCached } from '../skills/skills.js';
 import type { FileTracker } from '../tools/fileTracker.js';
 import { decide, type PermissionContext } from '../permissions/permissions.js';
 import { parseToolArguments } from '../util/jsonRepair.js';
@@ -52,7 +53,7 @@ export interface PermissionAnswer {
 export interface AgentUI {
   onEvent: (e: AgentEvent) => void;
   askPermission?: (req: PermissionRequest, meta: { toolCallId: string; subagent?: string }) => Promise<PermissionAnswer>;
-  askUser?: (question: string, options?: string[]) => Promise<string | null>;
+  askUser?: (questions: UserQuestion[]) => Promise<QuestionAnswer[] | null>;
   approvePlan?: (plan: string) => Promise<'acceptEdits' | 'default' | null>;
 }
 
@@ -142,6 +143,7 @@ export class Agent {
       extra: this.opts.mcp?.tools() ?? [],
       disallowed: this.opts.disallowedTools,
       interactive: this.opts.interactive && !!this.opts.ui.askUser,
+      hasSkills: loadSkillsCached(this.opts.projectRoot).length > 0,
     });
   }
 

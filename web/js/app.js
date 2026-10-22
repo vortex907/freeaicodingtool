@@ -103,6 +103,11 @@ async function loadState() {
   renderAll();
   loadSessions();
   loadChanges();
+  loadLaunch();
+  api.get('/api/update').then((u) => {
+    S.update = u;
+    renderSidebarFooter();
+  }).catch(() => {});
   if (!st.setupCompleted) showOnboarding(ctx);
   if (st.initialPrompt) send(st.initialPrompt);
 }
@@ -340,6 +345,10 @@ function handleMessage(msg, replay = false) {
       touchToolFor(msg.item);
       scrollChat(true);
       break;
+    case 'update':
+      S.update = msg.state;
+      renderSidebarFooter();
+      break;
     case 'pending_resolved': {
       const gone = S.pending.find((p) => p.id === msg.id);
       S.pending = S.pending.filter((p) => p.id !== msg.id);
@@ -416,7 +425,7 @@ function scrollChat(force = false) {
   if (force || nearBottom()) c.scrollTop = c.scrollHeight;
 }
 
-const TOOL_ICONS = { Read: 'fileText', Write: 'filePlus', Edit: 'pencil', MultiEdit: 'pencil', Update: 'pencil', Bash: 'terminal', BashOutput: 'terminal', KillShell: 'terminal', Glob: 'folder', LS: 'folder', Grep: 'search', WebFetch: 'globe', WebSearch: 'search', TodoWrite: 'listChecks', Task: 'bot', AskUser: 'message', ExitPlanMode: 'map' };
+const TOOL_ICONS = { Read: 'fileText', Write: 'filePlus', Edit: 'pencil', MultiEdit: 'pencil', Update: 'pencil', Bash: 'terminal', BashOutput: 'terminal', KillShell: 'terminal', Glob: 'folder', LS: 'folder', Grep: 'search', WebFetch: 'globe', WebSearch: 'search', TodoWrite: 'listChecks', Task: 'bot', AskUser: 'message', AskUserQuestion: 'message', Skill: 'sparkle', ExitPlanMode: 'map' };
 
 function splitLabel(label) {
   const m = /^([\w:.-]+)\(([\s\S]*)\)$/.exec(label || '');
@@ -667,6 +676,11 @@ function workingIndicator() {
 function updateWorking(el) {
   const live = S.live;
   clear(el);
+  const waiting = S.pending.find((p) => p.kind === 'question' || p.kind === 'permission' || p.kind === 'plan');
+  if (waiting) {
+    el.append(h('span', { class: 'spark' }, '✋'), h('span', { class: 'w-text paused' }, waiting.kind === 'question' ? 'Waiting for your answer' : waiting.kind === 'plan' ? 'Waiting for you to review the plan' : 'Waiting for your approval'), h('span', { class: 'w-meta' }, 'Esc to stop'));
+    return;
+  }
   if (live.wait && live.wait.until > Date.now()) {
     el.append(h('span', { class: 'spark' }, '⏳'), h('span', { class: 'w-text' }, `Waiting ${Math.ceil((live.wait.until - Date.now()) / 1000)}s for ${live.wait.model}`), h('span', { class: 'w-meta' }, `${live.wait.reason} · Esc to stop`));
     return;
@@ -709,6 +723,13 @@ document.addEventListener('click', (e) => {
       copy.lastChild.textContent = 'Copied';
       setTimeout(() => (copy.lastChild.textContent = 'Copy'), 1200);
     });
+    return;
+  }
+  const runBtn = e.target.closest?.('[data-run]');
+  if (runBtn) {
+    const code = runBtn.closest('.codeblock')?.querySelector('code')?.innerText ?? '';
+    const cmd = code.replace(/^\s*[$>]\s?/gm, '').trim();
+    if (cmd && confirm(`Run this in ${S.state?.project?.name ?? 'the project'}?\n\n${cmd}`)) api.post('/api/prompt', { text: `!${cmd}` }).catch((err) => toast(err.message, 'err'));
     return;
   }
   const a = e.target.closest?.('a[data-ext], a[href^="http"]');
@@ -798,22 +819,81 @@ function permissionCard(p) {
 }
 
 function questionCard(p) {
-  const input = h('input', { placeholder: 'Type your answer…' });
-  const send = h('button', { class: 'btn btn-primary btn-sm' }, 'Answer');
-  const doSend = () => input.value.trim() && respond(p.id, { answer: input.value.trim() });
-  send.addEventListener('click', doSend);
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') doSend();
-    e.stopPropagation();
+  const questions = p.questions || [];
+  const answers = questions.map(() => ({ selected: new Set(), other: '' }));
+  const submit = h('button', { class: 'btn btn-primary' }, questions.length > 1 ? 'Submit answers' : 'Submit');
+  const skip = h('button', { class: 'btn btn-ghost' }, 'Skip');
+  const answered = (i) => answers[i].selected.size > 0 || answers[i].other.trim() !== '';
+  const refresh = () => {
+    submit.disabled = !questions.every((_, i) => answered(i));
+  };
+  const send = () => {
+    if (submit.disabled) return;
+    respond(p.id, { answers: answers.map((a) => ({ selected: [...a.selected], other: a.other.trim() || undefined })) });
+  };
+  const blocks = questions.map((q, i) => {
+    const a = answers[i];
+    const tiles = [];
+    const other = h('input', { class: 'q-other-input', placeholder: q.options?.length ? 'Something else…' : 'Type your answer…', spellcheck: 'true' });
+    const syncTiles = () => {
+      for (const t of tiles) t.el.classList.toggle('sel', a.selected.has(t.label));
+    };
+    for (const [n, o] of (q.options || []).entries()) {
+      const el = h(
+        'button',
+        { class: `q-opt ${q.multiSelect ? 'multi' : ''}`, type: 'button' },
+        h('span', { class: 'q-mark' }, q.multiSelect ? icon('check', 'svg-sm') : h('span', { class: 'q-dot' })),
+        h('span', { class: 'q-texts' }, h('span', { class: 'q-label' }, o.label), o.description ? h('span', { class: 'q-desc' }, o.description) : null),
+        h('kbd', { class: 'q-key' }, String(n + 1)),
+      );
+      el.addEventListener('click', () => {
+        if (q.multiSelect) {
+          if (a.selected.has(o.label)) a.selected.delete(o.label);
+          else a.selected.add(o.label);
+        } else {
+          a.selected = new Set([o.label]);
+          a.other = '';
+          other.value = '';
+        }
+        syncTiles();
+        refresh();
+        // One single-choice question: a click is the answer.
+        if (questions.length === 1 && !q.multiSelect) send();
+      });
+      tiles.push({ el, label: o.label });
+    }
+    other.addEventListener('input', () => {
+      a.other = other.value;
+      if (!q.multiSelect && other.value.trim()) {
+        a.selected.clear();
+        syncTiles();
+      }
+      refresh();
+    });
+    other.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') send();
+    });
+    return h(
+      'div',
+      { class: 'q-block' },
+      h('div', { class: 'q-head' }, q.header ? h('span', { class: 'q-chip' }, q.header) : null, q.multiSelect ? h('span', { class: 'q-hint' }, 'Choose any') : null),
+      h('div', { class: 'q-text md', html: renderMarkdown(q.question) }),
+      tiles.length ? h('div', { class: 'q-opts' }, tiles.map((t) => t.el)) : null,
+      h('div', { class: 'q-other' }, other),
+    );
   });
-  const opts = (p.options || []).map((o) => {
-    const b = h('button', { class: 'btn' }, o);
-    b.addEventListener('click', () => respond(p.id, { answer: o }));
-    return b;
+  // Number keys pick options of the first question.
+  const card = h('div', { class: 'card question', 'data-pending': p.id, tabindex: '-1' }, h('div', { class: 'card-head' }, icon('message'), questions.length > 1 ? `FreeCode has ${questions.length} questions` : 'FreeCode has a question'), h('div', { class: 'card-body q-body' }, blocks), h('div', { class: 'card-actions' }, submit, skip));
+  card.addEventListener('keydown', (e) => {
+    const n = Number(e.key);
+    if (n >= 1 && n <= 9 && e.target.tagName !== 'INPUT') card.querySelectorAll('.q-block')[0]?.querySelectorAll('.q-opt')[n - 1]?.click();
   });
-  const skip = h('button', { class: 'btn btn-ghost btn-sm' }, 'Skip');
-  skip.addEventListener('click', () => respond(p.id, { answer: null }));
-  return h('div', { class: 'card', 'data-pending': p.id }, h('div', { class: 'card-head' }, icon('message'), 'FreeCode has a question'), h('div', { class: 'card-body' }, h('div', { class: 'md', html: renderMarkdown(p.question) })), opts.length ? h('div', { class: 'card-actions' }, opts) : null, h('div', { class: 'card-feedback' }, input, send, skip));
+  submit.addEventListener('click', send);
+  skip.addEventListener('click', () => respond(p.id, { answers: null }));
+  refresh();
+  setTimeout(() => card.focus({ preventScroll: true }), 0);
+  return card;
 }
 
 function planCard(p) {
@@ -1252,8 +1332,76 @@ function renderSidebarFooter() {
   settings.addEventListener('click', () => openSettings(ctx, 'providers'));
   const keys = h('button', { class: 'side-link' }, icon('key'), 'Providers & keys');
   keys.addEventListener('click', () => openSettings(ctx, 'providers'));
-  f.append(card, keys, settings);
+  const upd = updateCard();
+  f.append(...(upd ? [upd] : []), card, keys, settings);
 }
+
+/** Shows new versions from GitHub: progress while downloading, then "Restart to update". */
+function updateCard() {
+  const u = S.update;
+  if (!u || !u.latest || !['available', 'downloading', 'ready', 'installing'].includes(u.status)) return null;
+  const v = u.latest.version;
+  const notes = h('a', { href: u.latest.url, 'data-ext': '1', class: 'upd-link' }, "What's new");
+  if (u.status === 'installing') return h('div', { class: 'upd-card' }, h('div', { class: 't1' }, `Updating to ${v}…`), h('div', { class: 't2' }, 'FreeCode reopens in a moment.'));
+  if (u.status === 'downloading') {
+    const pct = Math.round((u.progress || 0) * 100);
+    return h('div', { class: 'upd-card' }, h('div', { class: 't1' }, `Downloading FreeCode ${v}`), h('div', { class: 'upd-bar' }, h('i', { style: { width: `${pct}%` } })), h('div', { class: 't2' }, `${pct}%`));
+  }
+  if (u.status === 'ready') {
+    const btn = h('button', { class: 'btn btn-primary btn-sm' }, icon('refresh', 'svg-sm'), 'Restart to update');
+    btn.addEventListener('click', async () => {
+      if (S.state?.busy) return toast('Stop the current task first, then update.', 'err');
+      btn.disabled = true;
+      const r = await api.post('/api/update/install').catch((e) => ({ ok: false, error: e.message }));
+      if (!r.ok) {
+        btn.disabled = false;
+        return toast(r.error || 'Could not start the update', 'err');
+      }
+      S.update = { ...u, status: 'installing' };
+      renderSidebarFooter();
+    });
+    return h('div', { class: 'upd-card ready' }, h('div', { class: 't1' }, icon('download', 'svg-sm'), `FreeCode ${v} is ready`), h('div', { class: 't2' }, 'Installs in a few seconds, or next time you open FreeCode. ', notes), btn);
+  }
+  // available
+  if (u.method === 'installer') {
+    const btn = h('button', { class: 'btn btn-sm' }, icon('download', 'svg-sm'), 'Download');
+    btn.addEventListener('click', () => api.post('/api/update/download').then((r) => !r.ok && toast(r.error, 'err')));
+    return h('div', { class: 'upd-card' }, h('div', { class: 't1' }, `FreeCode ${v} is available`), h('div', { class: 't2' }, notes), btn);
+  }
+  return h('div', { class: 'upd-card' }, h('div', { class: 't1' }, `FreeCode ${v} is available`), h('div', { class: 't2' }, u.command ? h('code', null, u.command) : notes));
+}
+
+// ---------------------------------------------------------------- Run / Open in
+
+async function loadLaunch() {
+  try {
+    S.launch = await api.get('/api/launch');
+  } catch {
+    S.launch = null;
+  }
+  renderTopbar();
+}
+
+async function runProject(command, save) {
+  try {
+    const r = await api.post('/api/launch/run', command ? { command, save: !!save } : {});
+    if (r.error === 'no-command') return editRunCommand();
+    if (!r.ok) toast(r.error || 'Could not start the project', 'err');
+    else toast(`Started in a terminal window: ${r.command}`, 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+async function editRunCommand() {
+  const current = S.launch?.run?.command || '';
+  const cmd = prompt('How should this project be started?\nIt runs in a terminal window in the project folder (e.g. npm run dev, dotnet run, python main.py).', current);
+  if (!cmd || !cmd.trim()) return;
+  await runProject(cmd.trim(), true);
+  loadLaunch();
+}
+
+const OPEN_ICONS = { editor: 'code', files: 'folder', terminal: 'terminal' };
 
 function renderTopbar() {
   const tb = $('topbar');
@@ -1267,6 +1415,31 @@ function renderTopbar() {
   }
   const title = st.session.title && st.session.title !== 'New task' ? st.session.title : 'New task';
   tb.append(h('div', { class: 'crumb' }, icon('folder', 'svg-sm'), st.project.name, h('span', { class: 'sep' }, '/')), h('div', { class: 'title' }, title), h('span', { class: 'grow' }));
+  const launch = S.launch;
+  const runBtn = h('button', { class: 'tb-btn', title: launch?.run ? `Run: ${launch.run.command}` : 'Run this project' }, icon('play', 'svg-sm'), 'Run');
+  runBtn.addEventListener('click', () => runProject());
+  const runMore = h('button', { class: 'tb-btn tb-caret', title: 'Run options' }, icon('chevronDown', 'svg-sm'));
+  runMore.addEventListener('click', () =>
+    showMenu(
+      runMore,
+      [...(launch?.run ? [{ id: 'run', label: 'Run', desc: launch.run.command, icon: 'play' }] : []), { id: 'edit', label: 'Change run command…', icon: 'pencil' }],
+      (it) => (it.id === 'run' ? runProject() : editRunCommand()),
+      { below: true },
+    ),
+  );
+  const openBtn = h('button', { class: 'tb-btn', title: 'Open this project in another app' }, icon('code', 'svg-sm'), 'Open', icon('chevronDown', 'svg-sm'));
+  openBtn.addEventListener('click', () =>
+    showMenu(
+      openBtn,
+      (launch?.targets ?? []).map((t) => ({ id: t.id, label: t.name, icon: OPEN_ICONS[t.kind] || 'external' })),
+      async (it) => {
+        const r = await api.post('/api/launch/open', { target: it.id }).catch((e) => ({ ok: false, error: e.message }));
+        if (!r.ok) toast(r.error || 'Could not open', 'err');
+      },
+      { below: true, title: 'Open project in' },
+    ),
+  );
+  tb.append(h('div', { class: 'tb-group' }, runBtn, runMore), openBtn);
   const c = st.context || { tokens: 0, budget: 1 };
   const pct = Math.min(100, Math.round((c.tokens / Math.max(1, c.budget)) * 100));
   tb.append(h('div', { class: `ctx-meter ${pct > 75 ? 'high' : ''}`, title: `Context: ~${fmtTokens(c.tokens)} of ${fmtTokens(c.budget)} tokens. Older messages are summarized automatically above the budget.` }, h('span', { class: 'bar' }, h('i', { style: { width: `${pct}%` } })), `${pct}%`));

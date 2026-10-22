@@ -71,6 +71,16 @@ VIAddVersionKey "LegalCopyright" "MIT License"
   Pop $0
 !macroend
 
+; "/RELAUNCH" (used by FreeCode's updater): open FreeCode again after a silent update.
+Function .onInstSuccess
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/RELAUNCH" $R1
+  ${IfNot} ${Errors}
+    Exec '"$INSTDIR\FreeCode.exe"'
+  ${EndIf}
+FunctionEnd
+
 Function .onInit
   ${IfNot} ${RunningX64}
     MessageBox MB_OK|MB_ICONSTOP "FreeCode needs 64-bit Windows 10 or newer."

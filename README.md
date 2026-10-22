@@ -11,7 +11,13 @@
   - On rate limits, used-up quotas, invalid keys, context overflow or server errors, it retries on the next model and remembers each cooldown.
   - Models that don't support tool calling get a text-based tool protocol instead.
   - Per-minute request and token limits are paced so you hit fewer 429s.
-- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, TodoWrite, sub-agents (Task), AskUser and plan mode.
+- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
+- **Asks like Claude.** When a decision is yours to make, you get a card with 2–4 clickable options (with descriptions) and an "Other" box, never a vague "what do you want me to do?".
+- **Live answers.** For anything that changes over time (versions, game updates, news, current docs), the agent searches the web first. Search needs no API key: it tries DuckDuckGo, Bing and Mojeek in turn.
+- **Skills and a skills marketplace.** It supports Claude-compatible `SKILL.md` skills. Install them in one click from [anthropics/skills](https://github.com/anthropics/skills) or any GitHub repository, and skills in `~/.claude/skills` work too.
+- **Run and Open in.** One click runs your project in a terminal window (`npm run dev`, `dotnet run`, `python main.py`, … detected automatically) or opens it in VS Code, Cursor, Visual Studio, Explorer or a terminal.
+- **Updates itself** from GitHub releases.
+- **Good habits even on small models.** The built-in playbook makes models explore first, plan, make small complete edits and verify them by actually running the code. It also has design rules, so the apps it builds look modern by default.
 - **Safe by default.** It asks before edits and commands, with permission modes and allow/deny rules. Checkpoints let you undo any change. Project settings are ignored until you trust the folder.
 - **Extensible:**
   - MCP servers (stdio and HTTP), hooks and custom slash commands.
@@ -25,7 +31,7 @@
 2. Double-click it. If Windows shows *"Windows protected your PC"*, click **More info** and then **Run anyway** (the installer isn't code-signed).
 3. Start **FreeCode** from the desktop icon or the Start menu.
 
-The setup bundles everything it needs, including its own Node.js runtime, so nothing else has to be installed. It installs for your user only (no admin rights) and adds:
+The setup bundles everything it needs, including its own Node.js runtime, so nothing else has to be installed. FreeCode runs in its own window, using the WebView2 engine built into Windows 10/11. It installs for your user only (no admin rights) and adds:
 
 - a desktop icon
 - a `freecode` command for terminals
@@ -33,6 +39,12 @@ The setup bundles everything it needs, including its own Node.js runtime, so not
 - an uninstaller under *Settings → Apps*
 
 There is also a portable `FreeCode-<version>-win-x64.zip`: unzip it anywhere and run `FreeCode.exe`.
+
+**Updates.** FreeCode checks this repository's releases shortly after it starts and then every few hours. It downloads a new version in the background and checks it against the release's `SHA256SUMS.txt`. Then:
+
+- the sidebar shows **Restart to update**;
+- if you ignore it, the update installs the next time you open FreeCode;
+- you can turn this off under *Settings → General*, or update by hand with `freecode update`.
 
 ### macOS, Linux (or Windows with Node.js)
 
@@ -102,6 +114,9 @@ To pin a model, use the model picker or `freecode -m groq/openai/gpt-oss-120b`. 
   - **Don't ask**: allows everything, so use it carefully
 - Approval cards let you allow once, always allow a rule, or deny with feedback. Esc stops a running task.
 - The right panel shows **Changes** (with *Undo last changes*), **Tasks** (the agent's todo list) and **Usage**.
+- The top bar has **Run** (starts the project in a terminal window; the ▾ menu changes the command) and **Open** (VS Code, Cursor, Windsurf, Visual Studio, Explorer/Finder, Terminal).
+- Shell snippets in answers have a **Run** button next to **Copy**.
+- **Settings → Skills:** see your installed skills, browse a marketplace (default [anthropics/skills](https://github.com/anthropics/skills)), and add more marketplaces as `owner/repo`. The agent loads a skill with the Skill tool when a task matches it. Try **frontend-design** for better-looking UIs.
 - Slash commands:
   - `/new`, `/compact`, `/undo`, `/init` (writes an `AGENTS.md` for the project)
   - `/review`, `/commit`, `/plan`, `/model`, `/memory`
@@ -120,6 +135,7 @@ freecode setup | providers | models --refresh | doctor | sessions
 freecode config set router.allowPaid true
 freecode mcp add github -- npx -y @modelcontextprotocol/server-github
 freecode install-shortcut       # desktop / menu icon for npm installs (--remove to undo)
+freecode update                 # update to the newest release
 ```
 
 Run `freecode --help` for every option.
@@ -132,6 +148,7 @@ Run `freecode --help` for every option.
 | `.freecode/settings.json` | Project settings, shared with your team |
 | `.freecode/settings.local.json` | Your own project overrides (git-ignored) |
 | `AGENTS.md` / `FREECODE.md` / `CLAUDE.md` | Project instructions the agent always reads |
+| `~/.freecode/skills/<name>/SKILL.md` | Your skills (also read: `~/.claude/skills`, and `.freecode/skills` / `.claude/skills` in a project) |
 
 Useful settings:
 
@@ -151,6 +168,16 @@ Hooks, MCP servers, environment variables and allow rules in a project's setting
 - **Check your keys:** run `freecode doctor` to test every configured key and show what's in your pool.
 - **Behind a proxy:** set `HTTPS_PROXY` and start with `NODE_USE_ENV_PROXY=1`.
 - **Ollama models forget things:** FreeCode asks Ollama for a larger context window (`num_ctx`). Pick models with at least 32K context for coding.
+
+## Releasing
+
+Bump `version` in `package.json`, then push a matching tag:
+
+```sh
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+The release workflow (`.github/workflows/release.yml`) runs the tests, builds the Windows setup and the portable zip, and publishes them with `SHA256SUMS.txt` as a GitHub release. That is where the built-in updater looks.
 
 ## Building the Windows installer
 
