@@ -19,6 +19,7 @@ import { DEFAULT_MARKETPLACES, fetchCatalog, installSkill, installedFrom, parseS
 import { Updater } from '../update/updater.js';
 import { screenshotPath } from '../browser/browser.js';
 import { transcribe, voiceProvider } from './voice.js';
+import { getIndex } from '../codeindex/index.js';
 
 export interface ServerOptions {
   cwd: string;
@@ -216,6 +217,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           if (!audio.length || audio.length > 20_000_000) return json(res, 200, { ok: false, error: 'No audio, or the recording is too long.' });
           return json(res, 200, await transcribe(controller.app.providers, audio, s('mediaType'), s('language') || undefined));
         }
+        case 'GET /api/index/projects':
+          return json(res, 200, getIndex().projects());
+        case 'POST /api/index/refresh':
+          void getIndex().refresh();
+          return json(res, 200, { ok: true });
         case 'GET /api/voice':
           return json(res, 200, { available: !!voiceProvider(controller.app.providers) });
         case 'POST /api/stop':

@@ -190,6 +190,7 @@ const TABS = [
   { id: 'permissions', label: 'Permissions', icon: 'shield' },
   { id: 'general', label: 'General', icon: 'sliders' },
   { id: 'skills', label: 'Skills', icon: 'package' },
+  { id: 'index', label: 'Code index', icon: 'search' },
   { id: 'mcp', label: 'MCP servers', icon: 'plug' },
   { id: 'about', label: 'About', icon: 'info' },
 ];
@@ -404,6 +405,8 @@ export function openSettings(ctx, tab = 'providers') {
       );
     } else if (id === 'skills') {
       await skillsTab(body, ctx, () => current === 'skills' && show('skills'));
+    } else if (id === 'index') {
+      await indexTab(body, ctx, () => current === 'index' && show('index'));
     } else if (id === 'mcp') {
       const list = st.mcp || [];
       clear(body).append(
@@ -562,6 +565,89 @@ export { escapeHtml };
 // ---------------------------------------------------------------- Skills
 
 const RECOMMENDED_SKILLS = new Set(['frontend-design', 'webapp-testing', 'pdf', 'docx', 'xlsx', 'pptx', 'mcp-builder', 'skill-creator']);
+
+// ------------------------------------------------------------------ code index
+
+function indexStatusText(s) {
+  if (!s) return 'Not started yet.';
+  if (!s.enabled) return 'Turned off.';
+  const p = s.progress || {};
+  const parts = [`${s.files.toLocaleString()} files`, `${s.symbols.toLocaleString()} symbols`, `${s.projects} project${s.projects === 1 ? '' : 's'}`];
+  if (s.indexing) {
+    const what = { loading: 'Loading the saved index', scanning: 'Looking for changed files', indexing: 'Indexing', history: 'Reading git history', saving: 'Saving' }[p.phase] || 'Working';
+    return `${what}${p.total ? ` (${p.done.toLocaleString()} of ${p.total.toLocaleString()})` : ''}. ${parts.join(', ')} so far.`;
+  }
+  return `${parts.join(', ')}.${s.lastUpdate ? ` Updated ${new Date(s.lastUpdate).toLocaleTimeString()}.` : ''}`;
+}
+
+async function indexTab(body, ctx, rerender) {
+  const st = ctx.state();
+  const idx = st.index || {};
+  let roots = [...(idx.configuredRoots || [])];
+  const save = async (patch) => {
+    await api.post('/api/settings', { patch });
+    await ctx.refresh();
+    rerender();
+  };
+  const status = h('div', { class: 'index-status' }, indexStatusText(idx));
+  // Live progress while the tab is open.
+  const onIndex = (e) => {
+    if (!status.isConnected) return document.removeEventListener('fc-index', onIndex);
+    status.textContent = indexStatusText(e.detail);
+  };
+  document.addEventListener('fc-index', onIndex);
+
+  const rootList = h('div', { class: 'rules' });
+  const drawRoots = () => {
+    clear(rootList);
+    if (!roots.length) rootList.append(h('div', { class: 'muted', style: { padding: '6px 0', fontSize: '12.5px' } }, 'Only the open project is indexed. Add a folder that holds your other projects to search across all of them.'));
+    roots.forEach((r, i) => {
+      const rm = h('button', { class: 'btn btn-ghost btn-sm' }, 'Remove');
+      rm.addEventListener('click', () => {
+        roots.splice(i, 1);
+        save({ 'index.roots': roots });
+      });
+      rootList.append(h('div', { class: 'rule' }, h('span', { class: 'mono', style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, r), rm));
+    });
+  };
+  drawRoots();
+  const input = h('input', { class: 'text-input', placeholder: 'C:\\Users\\you\\Desktop\\Projects', spellcheck: 'false', style: { flex: 1 } });
+  const add = h('button', { class: 'btn btn-primary btn-sm' }, 'Add folder');
+  const doAdd = () => {
+    const v = input.value.trim().replace(/^"|"$/g, '');
+    if (!v) return;
+    if (!roots.includes(v)) roots.push(v);
+    input.value = '';
+    save({ 'index.roots': roots });
+  };
+  add.addEventListener('click', doAdd);
+  input.addEventListener('keydown', (e) => e.key === 'Enter' && doAdd());
+  const refresh = h('button', { class: 'btn btn-sm' }, icon('refresh', 'svg-sm'), 'Refresh now');
+  refresh.addEventListener('click', () => api.post('/api/index/refresh').then(() => ctx.toast('Refreshing the index')));
+
+  const projects = h('div', { class: 'index-projects' });
+  api.get('/api/index/projects').then((list) => {
+    if (!list.length) return;
+    projects.append(h('div', { class: 'panel-section-title' }, `Projects found (${list.length})`));
+    for (const p of list.slice(0, 200)) {
+      const langs = p.languages.slice(0, 3).map((l) => l.name).join(', ');
+      projects.append(h('div', { class: 'index-project' }, h('span', { class: 'ip-name' }, p.name), h('span', { class: 'ip-langs' }, langs), p.summary ? h('div', { class: 'ip-summary' }, p.summary) : null));
+    }
+  }).catch(() => undefined);
+
+  clear(body).append(
+    h('p', { class: 'muted', style: { marginTop: 0 } }, 'FreeCode keeps a local index of your code (files, symbols, imports between projects, dependencies and git history) so the agent can find things across projects with the CodeSearch tool. Everything stays on this computer.'),
+    field('Index code', 'Turn off to stop indexing and hide the CodeSearch tool.', toggle(idx.enabled !== false, (v) => save({ 'index.enabled': v }))),
+    h('div', { class: 'panel-section-title' }, 'Folders with your other projects'),
+    rootList,
+    h('div', { class: 'row', style: { gap: '8px', marginTop: '8px' } }, input, add),
+    h('div', { class: 'muted', style: { marginTop: '6px', fontSize: '12.5px' } }, 'Each project inside the folder is detected on its own (package.json, .csproj or .sln, pyproject, Cargo.toml, go.mod, Unity, Godot, Unreal and more). Big folders take a few minutes the first time and use more memory.'),
+    h('div', { class: 'panel-section-title' }, 'Status'),
+    h('div', { class: 'row', style: { gap: '10px', alignItems: 'center' } }, status, h('span', { class: 'grow' }), refresh),
+    ...((idx.errors || []).length ? [h('div', { class: 'note warn', style: { marginTop: '8px', whiteSpace: 'pre-line' } }, idx.errors.slice(0, 3).join('\n'))] : []),
+    projects,
+  );
+}
 
 async function skillsTab(body, ctx, rerender) {
   const data = await api.get('/api/skills');

@@ -365,6 +365,10 @@ function handleAgentEvent(e, replay) {
 
 function handleMessage(msg, replay = false) {
   switch (msg.type) {
+    case 'index':
+      if (S.state) S.state.index = { ...msg.status, configuredRoots: S.state.index?.configuredRoots ?? [] };
+      document.dispatchEvent(new CustomEvent('fc-index', { detail: msg.status }));
+      break;
     case 'agent':
       handleAgentEvent(msg.event, replay);
       if (!replay) scheduleChat();
