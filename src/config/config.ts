@@ -138,6 +138,8 @@ export interface Settings {
   runCommand?: string;
   /** Skills marketplaces: GitHub repositories ("owner/repo") with SKILL.md folders. */
   skills?: { marketplaces?: string[] };
+  /** Code index (CodeSearch): on by default; roots are extra folders of projects to index next to the current one. Global only. */
+  index?: { enabled?: boolean; roots?: string[] };
 }
 
 export function defaultSettings(): Settings {
@@ -183,6 +185,8 @@ export function sanitizeUntrustedSettings(s: Partial<Settings>): Partial<Setting
   delete out.model;
   delete out.approvedMcpServers;
   delete out.trustedFolders;
+  // Index roots would let a repository point the agent at other folders on the machine.
+  delete out.index;
   if (out.router) {
     const r = { ...out.router };
     delete (r as Partial<Settings['router']>).allowPaid;

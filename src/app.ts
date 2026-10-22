@@ -18,6 +18,7 @@ import { loadCustomCommands, type CustomCommand } from './agent/customCommands.j
 import { type SavedSession, newSessionId, saveSession, sessionTitle } from './session/session.js';
 import { gitRoot } from './util/git.js';
 import { runHooks } from './agent/hooks.js';
+import { applyIndexSettings, getIndex, indexPromptSection, isCodeIndexEnabled } from './codeindex/index.js';
 import { debug } from './util/log.js';
 
 export interface AppOptions {
@@ -86,6 +87,9 @@ export class App {
     [this.memory, this.customCommands] = await Promise.all([loadMemoryFiles(this.projectRoot, this.cwd), loadCustomCommands(this.projectRoot)]);
     const hook = await runHooks(this.settings, 'SessionStart', { session_id: this.sessionId, cwd: this.cwd }, { cwd: this.projectRoot });
     if (hook.context.length) this.agent.addContext(`<session-start-context>\n${hook.context.join('\n')}\n</session-start-context>`, 'command');
+    // Index the project in the background (incremental; the saved index loads in a moment).
+    void getIndex().ensureProject(this.projectRoot);
+    if (this.opts.interactive) getIndex().startAutoRefresh();
   }
 
   createAgent(ui: AgentUI): Agent {
@@ -117,6 +121,7 @@ export class App {
 
   reloadConfig(): void {
     this.loaded = loadConfig(this.projectRoot ?? this.cwd, this.opts.overrides, { trusted: this.opts.trusted });
+    applyIndexSettings(this.loaded.global.index);
     if (this.agent) {
       const p = this.agent.opts.permissions;
       p.allow = [...this.settings.permissions.allow, ...(this.opts.allowedTools ?? [])];
@@ -164,6 +169,8 @@ export class App {
         depth: ctx.depth,
         mcpInstructions: this.mcp.instructions(),
         skillsSection: skillsPromptSection(loadSkillsCached(this.projectRoot)),
+        indexSection: indexPromptSection(this.projectRoot),
+        codeSearch: isCodeIndexEnabled(),
       },
       this.envCache.text,
     );
@@ -233,5 +240,7 @@ export class App {
     killAllShells(this.session.shells);
     this.mcp.closeAll();
     this.health.saveNow();
+    // Stops indexing and saves progress; the next ensureProject resumes it.
+    void getIndex().suspend();
   }
 }

@@ -25,6 +25,7 @@ import { gitRoot } from '../util/git.js';
 import { truncate } from '../util/strings.js';
 import { debug } from '../util/log.js';
 import { VERSION } from '../version.js';
+import { getIndex } from '../codeindex/index.js';
 
 export type UIItem =
   | { kind: 'user'; id: string; text: string; ts?: number; queued?: boolean }
@@ -79,7 +80,10 @@ export class Controller {
   constructor(
     private broadcast: Broadcast,
     private baseOpts: { cwd: string; permissionMode?: PermissionMode; model?: string; allowedTools?: string[]; disallowedTools?: string[]; trusted?: boolean; overrides?: Partial<Settings> },
-  ) {}
+  ) {
+    // Code index progress for the UI (throttled by the index).
+    getIndex().subscribe((status) => this.broadcast({ type: 'index', status }));
+  }
 
   // ------------------------------------------------------------------ lifecycle
 
@@ -253,6 +257,7 @@ export class Controller {
       commands: [...GUI_COMMANDS, ...app.customCommands.map((c) => ({ name: c.name, description: c.description, args: c.argumentHint, custom: true }))],
       recentProjects: ((readGlobalConfig() as Record<string, unknown>).recentProjects as string[] | undefined) ?? [],
       home: os.homedir(),
+      index: { ...getIndex().status(), configuredRoots: readGlobalConfig().index?.roots ?? [] },
     };
     if (full) {
       out.transcript = this.transcript();
@@ -638,7 +643,7 @@ export class Controller {
   // ------------------------------------------------------------------ settings
 
   updateSettings(patch: Record<string, unknown>): void {
-    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate', 'plainPunctuation'];
+    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate', 'plainPunctuation', 'index.enabled', 'index.roots'];
     updateGlobalConfig((g) => {
       for (const [k, v] of Object.entries(patch)) if (allowed.includes(k)) setByPath(g as Record<string, unknown>, k, v);
     });
