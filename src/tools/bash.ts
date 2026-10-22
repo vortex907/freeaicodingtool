@@ -10,7 +10,7 @@ import { stripAnsi } from '../util/ansi.js';
 import { formatDuration, randomId, truncate, truncateMiddle } from '../util/strings.js';
 import { invalidateFileListCache } from './listFiles.js';
 
-const MAX_OUTPUT_FOR_MODEL = 20_000;
+export const MAX_OUTPUT_FOR_MODEL = 20_000;
 const MAX_CAPTURE = 4 * 1024 * 1024;
 
 const INTERACTIVE: { re: RegExp; hint: string }[] = [
@@ -58,7 +58,7 @@ export function suggestBashRule(command: string): { rule: string; label: string 
   return { rule: `Bash(${prefix}:*)`, label: `\`${prefix}\` commands` };
 }
 
-function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
+export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
   if (!child.pid) return;
   try {
     if (isWindows) spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });

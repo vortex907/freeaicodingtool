@@ -8,6 +8,8 @@ import { AskUserTool, ExitPlanModeTool, TaskTool, TodoWriteTool } from './metaTo
 import { SkillTool } from './skillTool.js';
 import { BrowserTool } from './browserTool.js';
 import { DesktopTool } from './desktopTool.js';
+import { ReplTool } from './repl.js';
+import { DebuggerTool } from './debugger.js';
 import { isWindows } from '../util/platform.js';
 
 export const BUILTIN_TOOLS: Tool[] = [
@@ -18,6 +20,8 @@ export const BUILTIN_TOOLS: Tool[] = [
   BashTool,
   BashOutputTool,
   KillShellTool,
+  ReplTool,
+  DebuggerTool,
   GlobTool,
   GrepTool,
   LSTool,
@@ -50,7 +54,7 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   let tools = [...BUILTIN_TOOLS, ...(opts.extra ?? [])];
   if (opts.depth > 0) {
     const explore = opts.agentType === 'explore';
-    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'TodoWrite'])]);
+    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'TodoWrite', 'REPL', 'Debugger'])]);
     tools = tools.filter((t) => allowed.has(t.name) || t.category === 'mcp');
   } else {
     if (!opts.planMode) tools = tools.filter((t) => t.name !== 'ExitPlanMode');
@@ -120,6 +124,23 @@ const ALIASES: Record<string, string> = {
   ask_followup_question: 'AskUserQuestion',
   ask: 'AskUserQuestion',
   exit_plan_mode: 'ExitPlanMode',
+  python: 'REPL',
+  python3: 'REPL',
+  ipython: 'REPL',
+  python_repl: 'REPL',
+  run_python: 'REPL',
+  execute_python: 'REPL',
+  code_interpreter: 'REPL',
+  jupyter: 'REPL',
+  node_repl: 'REPL',
+  js_repl: 'REPL',
+  javascript: 'REPL',
+  run_javascript: 'REPL',
+  pdb: 'Debugger',
+  debug: 'Debugger',
+  node_inspect: 'Debugger',
+  python_debugger: 'Debugger',
+  node_debugger: 'Debugger',
 };
 
 export function aliasOf(name: string): string | undefined {

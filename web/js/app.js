@@ -915,8 +915,9 @@ function permissionCard(p) {
   let title;
   let ico;
   if (r.category === 'execute') {
-    title = 'Run this command?';
-    ico = 'terminal';
+    // REPL, Debugger and Desktop explain themselves ("Run Python code", "Control a desktop app").
+    title = r.tool === 'Bash' || !r.title ? 'Run this command?' : `${r.title}?`;
+    ico = r.tool === 'Desktop' ? 'eye' : r.tool === 'REPL' || r.tool === 'Debugger' ? 'code' : 'terminal';
   } else if (r.category === 'edit') {
     title = r.title === 'Create file' ? 'Create this file?' : 'Make this edit?';
     ico = 'pencil';
