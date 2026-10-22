@@ -11,7 +11,12 @@
   - On rate limits, used-up quotas, invalid keys, context overflow or server errors, it retries on the next model and remembers each cooldown.
   - Models that don't support tool calling get a text-based tool protocol instead.
   - Per-minute request and token limits are paced so you hit fewer 429s.
-- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
+- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, Browser, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
+- **It looks at what it builds.** The Browser tool opens your page or dev server in headless Edge or Chrome and reports what a person would notice: console errors, failed requests, sideways overflow, cut-off text, overlapping elements, low contrast, tiny click targets, unlabeled fields and broken images, plus phone and tablet widths. Models that can see images also get the screenshot. While a page is open, every UI edit reloads it and the edit result says what broke.
+- **Catches broken edits at once.** After each edit, JSON, JavaScript, Python and TypeScript files are syntax checked and errors go straight back to the model.
+- **Knows your machine.** The prompt lists the installed tools and versions (node, python, dotnet, java, go, rustc, gcc, git, docker) and what is missing.
+- **One-command workflows:** `/tdd`, `/security`, `/pr`, `/onboard`, `/deps`, `/cleanup`, `/fuzz`, `/bench`, `/audit-ui`, `/ci-fix`, `/env` and `/port`. `/commit` runs the tests before committing.
+- **Clickable references.** `file:line` in answers, stack traces and compiler errors opens in VS Code, Cursor, Windsurf or Zed at that line.
 - **Asks like Claude.** When a decision is yours to make, you get a card with 2-4 clickable options (with descriptions) and an "Other" box, never a vague "what do you want me to do?".
 - **Live answers.** For anything that changes over time (versions, game updates, news, current docs), the agent searches the web first. Search needs no API key: it tries DuckDuckGo, Bing and Mojeek in turn.
 - **Skills and a skills marketplace.** It supports Claude-compatible `SKILL.md` skills. Install them in one click from [anthropics/skills](https://github.com/anthropics/skills) or any GitHub repository, and skills in `~/.claude/skills` work too.
@@ -125,7 +130,8 @@ To pin a model, use the model picker or `freecode -m groq/openai/gpt-oss-120b`. 
 - **Settings → Skills:** see your installed skills, browse a marketplace (default [anthropics/skills](https://github.com/anthropics/skills)), and add more marketplaces as `owner/repo`. The agent loads a skill with the Skill tool when a task matches it. Try **frontend-design** for better-looking UIs.
 - Slash commands:
   - `/new`, `/compact`, `/undo`, `/init` (writes an `AGENTS.md` for the project)
-  - `/review`, `/commit`, `/plan`, `/model`, `/memory`
+  - `/review`, `/commit` (runs the tests first), `/plan`, `/model`, `/memory`
+  - workflows: `/tdd <feature>`, `/security`, `/pr`, `/onboard`, `/deps`, `/cleanup`, `/fuzz <function>`, `/bench <what>`, `/audit-ui [url]`, `/ci-fix`, `/env`, `/port <number>`
   - `/reset-limits`, `/setup`, `/help`
   - your own commands from `.freecode/commands/*.md`
 
