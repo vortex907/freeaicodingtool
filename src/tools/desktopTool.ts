@@ -2,10 +2,10 @@
 // The control tree from UI Automation lets text-only models "see" the window; vision models also get a
 // screenshot. Windows only for now.
 import { execFile } from 'node:child_process';
-import { promises as fsp } from 'node:fs';
+import { existsSync, promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { saveScreenshot } from '../browser/browser.js';
 import { WINDOW_SCRIPT } from '../desktop/windowScript.js';
 import { isWindows } from '../util/platform.js';
@@ -51,12 +51,24 @@ interface ScriptResult {
 const ACTIONS = ['list', 'capture', 'click', 'type', 'keys', 'close'] as const;
 type Action = (typeof ACTIONS)[number];
 
-function runScript(args: Record<string, unknown>, timeoutMs = 45_000): Promise<ScriptResult> {
+/** The script as a file: encoded on the command line it would pass Windows' 32K character limit. */
+async function scriptFile(): Promise<string> {
+  const hash = createHash('sha1').update(WINDOW_SCRIPT).digest('hex').slice(0, 12);
+  const file = path.join(os.tmpdir(), `freecode-window-${hash}.ps1`);
+  if (!existsSync(file)) {
+    // The BOM makes Windows PowerShell 5.1 read the file as UTF-8.
+    await fsp.writeFile(`${file}.tmp`, `\uFEFF${WINDOW_SCRIPT}`, 'utf8');
+    await fsp.rename(`${file}.tmp`, file).catch(() => undefined);
+  }
+  return file;
+}
+
+async function runScript(args: Record<string, unknown>, timeoutMs = 45_000): Promise<ScriptResult> {
+  const file = await scriptFile();
   return new Promise((resolve) => {
-    const encoded = Buffer.from(WINDOW_SCRIPT, 'utf16le').toString('base64');
     execFile(
       'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file],
       { env: { ...process.env, FC_ARGS: JSON.stringify(args) }, timeout: timeoutMs, windowsHide: true, maxBuffer: 8 << 20 },
       (err, stdout, stderr) => {
         const line = stdout.trim().split(/\r?\n/).filter((l) => l.startsWith('{')).pop();
