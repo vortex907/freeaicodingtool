@@ -11,8 +11,9 @@
   - On rate limits, used-up quotas, invalid keys, context overflow or server errors, it retries on the next model and remembers each cooldown.
   - Models that don't support tool calling get a text-based tool protocol instead.
   - Per-minute request and token limits are paced so you hit fewer 429s.
-- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, Browser, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
+- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, Browser, Desktop, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
 - **It looks at what it builds.** The Browser tool opens your page or dev server in headless Edge or Chrome and reports what a person would notice: console errors, failed requests, sideways overflow, cut-off text, overlapping elements, low contrast, tiny click targets, unlabeled fields and broken images, plus phone and tablet widths. Models that can see images also get the screenshot. While a page is open, every UI edit reloads it and the edit result says what broke.
+- **Sees desktop apps too (Windows).** The Desktop tool screenshots a running app window (WinForms, WPF, WinUI, Electron, games), reads its controls through UI Automation (type, name, position, size, current value) and flags controls outside the window, overlapping or tiny ones. It can click buttons and type into fields to test the app, after asking you.
 - **Catches broken edits at once.** After each edit, JSON, JavaScript, Python and TypeScript files are syntax checked and errors go straight back to the model.
 - **Knows your machine.** The prompt lists the installed tools and versions (node, python, dotnet, java, go, rustc, gcc, git, docker) and what is missing.
 - **One-command workflows:** `/tdd`, `/security`, `/pr`, `/onboard`, `/deps`, `/cleanup`, `/fuzz`, `/bench`, `/audit-ui`, `/ci-fix`, `/env` and `/port`. `/commit` runs the tests before committing.
@@ -124,7 +125,7 @@ To pin a model, use the model picker or `freecode -m groq/openai/gpt-oss-120b`. 
   - **Plan mode**: read-only until you approve a plan
   - **Don't ask**: allows everything, so use it carefully
 - Approval cards let you allow once, always allow a rule, or deny with feedback. Big edits show their first lines; **Review all N lines** opens the whole diff full size. Esc stops a running task.
-- The right panel shows **Changes** (with *Undo last changes*), **Tasks** (the agent's todo list) and **Usage**.
+- The right panel shows **Changes** (with *Undo last changes* and a **Checkpoints** list: rewind the files to before any earlier request), **Tasks** (the agent's todo list) and **Usage**.
 - The top bar has **Run** (starts the project in a terminal window; the ▾ menu changes the command) and **Open** (VS Code, Cursor, Windsurf, Visual Studio, Explorer/Finder, Terminal, Claude Code).
 - Shell snippets in answers have a **Run** button next to **Copy**.
 - **Settings → Skills:** see your installed skills, browse a marketplace (default [anthropics/skills](https://github.com/anthropics/skills)), and add more marketplaces as `owner/repo`. The agent loads a skill with the Skill tool when a task matches it. Try **frontend-design** for better-looking UIs.
