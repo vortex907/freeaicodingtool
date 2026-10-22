@@ -1,18 +1,47 @@
 # Builds the Windows setup and publishes it as a GitHub release. FreeCode's built-in updater
 # downloads new versions from these releases (checking the setup against SHA256SUMS.txt).
-# Release a version: bump "version" in package.json, then push a tag, e.g. git tag v1.2.0 && git push origin v1.2.0
+#
+# To release: bump "version" in package.json and push. If there is no release for that version
+# yet, this builds and publishes v<version> (creating the tag). Pushing a v* tag works too.
 name: Release
 
 on:
   push:
+    branches: ['**']
     tags: ['v*']
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      needed: ${{ steps.v.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release v${VERSION} already exists."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
   windows:
+    needs: check
+    if: needs.check.outputs.needed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,10 +60,8 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
-          TAG="${GITHUB_REF_NAME}"
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then TAG="v${VERSION}"; fi
-          if [ "${TAG#v}" != "${VERSION}" ]; then echo "Tag ${TAG} does not match package.json version ${VERSION}"; exit 1; fi
+          TAG="v${VERSION}"
           gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "FreeCode ${VERSION}" --generate-notes
           gh release upload "$TAG" release/FreeCode-Setup-*.exe release/FreeCode-*-win-x64.zip release/SHA256SUMS.txt --clobber

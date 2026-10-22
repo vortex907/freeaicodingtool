@@ -171,13 +171,7 @@ Hooks, MCP servers, environment variables and allow rules in a project's setting
 
 ## Releasing
 
-Bump `version` in `package.json`, then push a matching tag:
-
-```sh
-git tag v1.2.0 && git push origin v1.2.0
-```
-
-The release workflow (`.github/workflows/release.yml`) runs the tests, builds the Windows setup and the portable zip, and publishes them with `SHA256SUMS.txt` as a GitHub release. That is where the built-in updater looks.
+Bump `version` in `package.json` and push. If that version has no release yet, the release workflow (`.github/workflows/release.yml`) runs the tests, builds the Windows setup and the portable zip, and publishes them as release `v<version>` with `SHA256SUMS.txt`. That is where the built-in updater looks. Pushing a `v*` tag works too.
 
 ## Building the Windows installer
 
