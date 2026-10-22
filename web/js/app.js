@@ -430,7 +430,7 @@ function scrollChat(force = false) {
   if (force || nearBottom()) c.scrollTop = c.scrollHeight;
 }
 
-const TOOL_ICONS = { Read: 'fileText', Write: 'filePlus', Edit: 'pencil', MultiEdit: 'pencil', Update: 'pencil', Bash: 'terminal', BashOutput: 'terminal', KillShell: 'terminal', Glob: 'folder', LS: 'folder', Grep: 'search', WebFetch: 'globe', WebSearch: 'search', TodoWrite: 'listChecks', Task: 'bot', AskUser: 'message', AskUserQuestion: 'message', Skill: 'sparkle', ExitPlanMode: 'map', Browser: 'eye', REPL: 'code', Debugger: 'zap', CodeSearch: 'search' };
+const TOOL_ICONS = { Read: 'fileText', Write: 'filePlus', Edit: 'pencil', MultiEdit: 'pencil', Update: 'pencil', Bash: 'terminal', BashOutput: 'terminal', KillShell: 'terminal', Glob: 'folder', LS: 'folder', Grep: 'search', WebFetch: 'globe', WebSearch: 'search', TodoWrite: 'listChecks', Task: 'bot', AskUser: 'message', AskUserQuestion: 'message', Skill: 'sparkle', ExitPlanMode: 'map', Browser: 'eye', Desktop: 'eye', REPL: 'code', Debugger: 'zap', CodeSearch: 'search' };
 
 function splitLabel(label) {
   const m = /^([\w:.-]+)\(([\s\S]*)\)$/.exec(label || '');

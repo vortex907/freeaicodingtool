@@ -7,6 +7,8 @@ import { WebFetchTool, WebSearchTool } from './webTools.js';
 import { AskUserTool, ExitPlanModeTool, TaskTool, TodoWriteTool } from './metaTools.js';
 import { SkillTool } from './skillTool.js';
 import { BrowserTool } from './browserTool.js';
+import { DesktopTool } from './desktopTool.js';
+import { isWindows } from '../util/platform.js';
 
 export const BUILTIN_TOOLS: Tool[] = [
   ReadTool,
@@ -22,6 +24,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   WebFetchTool,
   WebSearchTool,
   BrowserTool,
+  DesktopTool,
   TodoWriteTool,
   TaskTool,
   AskUserTool,
@@ -54,6 +57,7 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   }
   if (!opts.interactive) tools = tools.filter((t) => t.name !== 'AskUserQuestion');
   if (!opts.hasSkills) tools = tools.filter((t) => t.name !== 'Skill');
+  if (!isWindows) tools = tools.filter((t) => t.name !== 'Desktop');
   if (opts.disallowed?.length) {
     const deny = new Set(opts.disallowed.map((d) => d.replace(/\(.*$/, '')));
     tools = tools.filter((t) => !deny.has(t.name));
