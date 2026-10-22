@@ -91,6 +91,18 @@ class Mutex {
 }
 const permissionMutex = new Mutex();
 
+/** Hidden note for questions about things that change over time, so even small models search instead of guessing. */
+export const LIVE_INFO_REMINDER =
+  '<system-reminder>This asks about something that may have changed since your training (versions, releases, game or app updates, news, prices, current docs). Search the web first (WebSearch with the current year, then WebFetch the best sources) and answer from what you find, with dates and links.</system-reminder>';
+
+export function asksAboutCurrentInfo(text: string): boolean {
+  const t = text.trim();
+  if (t.length > 600) return false;
+  const question = /\?\s*$/.test(t) || /^(what|which|when|who|is|are|does|do|did|has|have|how (much|many)|check|look up|find out|search|tell me|show me)\b/i.test(t);
+  const timely = /\b(latest|newest|current(ly)?|recent(ly)?|today|tonight|yesterday|this (week|month|year)|right now|now|update[sd]?|patch(es| notes)?|release[sd]?|version|changelog|news|price[sd]?|cost|weather|score[sd]?|standings|still (supported|maintained|alive)|deprecated|20[2-3]\d)\b/i.test(t);
+  return question && timely;
+}
+
 export class Agent {
   messages: ChatMessage[] = [];
   turn = 0;
@@ -179,6 +191,7 @@ export class Agent {
           return { text: '', reason: 'denied' };
         }
         if (hook.context.length) content += `\n\n<hook-context>\n${hook.context.join('\n')}\n</hook-context>`;
+        if (asksAboutCurrentInfo(input)) content += `\n\n${LIVE_INFO_REMINDER}`;
       }
       this.messages.push({ role: 'user', content, images: opts.images, meta: { turn: this.turn, ts: Date.now() } });
 

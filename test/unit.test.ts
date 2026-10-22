@@ -151,3 +151,9 @@ test('marketplace sources accept owner/repo, @ref and GitHub links', async () =>
   assert.deepEqual(parseSource('https://github.com/a/b/tree/main'), { owner: 'a', repo: 'b', ref: 'main' });
   assert.equal(parseSource('not a repo'), null);
 });
+
+test('time-sensitive questions get the search reminder, coding requests do not', async () => {
+  const { asksAboutCurrentInfo } = await import('../src/agent/agent.js');
+  for (const q of ['check what cs2 update we are in', "what's the latest version of react?", 'Is Python 3.8 still supported?', 'who won the game today?', 'what are the newest gemini models']) assert.equal(asksAboutCurrentInfo(q), true, q);
+  for (const q of ['update the README with install steps', 'make a calculator in csharp and make it good', 'fix the failing test', 'add a version field to package.json']) assert.equal(asksAboutCurrentInfo(q), false, q);
+});

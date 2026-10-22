@@ -247,7 +247,7 @@ export class Controller {
 
   private sessionTitle(): string {
     const first = this.app.agent.messages.find((m) => m.role === 'user' && !m.meta?.synthetic);
-    return first ? truncate(first.content.replace(/<attached-[\s\S]*$/, '').replace(/\s+/g, ' ').trim(), 80) : 'New task';
+    return first ? truncate(first.content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').replace(/<attached-[\s\S]*$/, '').replace(/\s+/g, ' ').trim(), 80) : 'New task';
   }
 
   /** Builds displayable items from the conversation history. */
@@ -267,7 +267,10 @@ export class Controller {
           items.push({ kind: 'shell', id: `h${i}`, command: cmd, output: m.content.split('\n').slice(1).join('\n'), exitCode: null });
         } else if (m.meta?.synthetic) continue;
         else {
-          const text = m.content.replace(/\n\n<attached-(file|folder)[\s\S]*$/, '').replace(/^\[The user sent this message while you were working\]\n/, '');
+          const text = m.content
+            .replace(/\n\n<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+            .replace(/\n\n<attached-(file|folder)[\s\S]*$/, '')
+            .replace(/^\[The user sent this message while you were working\]\n/, '');
           items.push({ kind: 'user', id: `h${i}`, text, ts: m.meta?.ts, queued: k === 'queued' });
         }
       } else if (m.role === 'assistant') {
