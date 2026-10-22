@@ -1,6 +1,6 @@
 // FreeCode app: chat UI driven by the local FreeCode engine.
 import { h, clear, icon, iconHtml, escapeHtml, fmtTokens, fmtDuration, timeAgo, dayGroup, debounce } from './dom.js';
-import { api, connectEvents } from './api.js';
+import { api, connectEvents, token } from './api.js';
 import { renderMarkdown } from './markdown.js';
 import { highlightLine, langFromPath } from './highlight.js';
 import { showOnboarding, openSettings, openFolderPicker } from './settings.js';
@@ -430,7 +430,7 @@ function scrollChat(force = false) {
   if (force || nearBottom()) c.scrollTop = c.scrollHeight;
 }
 
-const TOOL_ICONS = { Read: 'fileText', Write: 'filePlus', Edit: 'pencil', MultiEdit: 'pencil', Update: 'pencil', Bash: 'terminal', BashOutput: 'terminal', KillShell: 'terminal', Glob: 'folder', LS: 'folder', Grep: 'search', WebFetch: 'globe', WebSearch: 'search', TodoWrite: 'listChecks', Task: 'bot', AskUser: 'message', AskUserQuestion: 'message', Skill: 'sparkle', ExitPlanMode: 'map' };
+const TOOL_ICONS = { Read: 'fileText', Write: 'filePlus', Edit: 'pencil', MultiEdit: 'pencil', Update: 'pencil', Bash: 'terminal', BashOutput: 'terminal', KillShell: 'terminal', Glob: 'folder', LS: 'folder', Grep: 'search', WebFetch: 'globe', WebSearch: 'search', TodoWrite: 'listChecks', Task: 'bot', AskUser: 'message', AskUserQuestion: 'message', Skill: 'sparkle', ExitPlanMode: 'map', Browser: 'eye', REPL: 'code', Debugger: 'zap', CodeSearch: 'search' };
 
 function splitLabel(label) {
   const m = /^([\w:.-]+)\(([\s\S]*)\)$/.exec(label || '');
@@ -486,6 +486,7 @@ function toolMeta(item) {
   if (d?.kind === 'diff') {
     bits.push(h('span', { class: 'add' }, `+${d.added}`), h('span', { class: 'del' }, `−${d.removed}`));
   } else if (d?.kind === 'summary') bits.push(h('span', null, d.text));
+  else if (d?.kind === 'image') bits.push(h('span', null, d.summary || 'screenshot'));
   else if (d?.kind === 'todos') bits.push(h('span', null, `${d.todos.filter((t) => t.status === 'completed').length}/${d.todos.length} done`));
   else if (d?.kind === 'text' && item.status !== 'running') {
     const n = d.text.split('\n').filter((l) => l.trim()).length;
@@ -501,7 +502,7 @@ function defaultOpen(item) {
   const d = item.result?.display;
   if (item.status === 'error') return true;
   if (d?.kind === 'diff' && (d.added + d.removed) <= 60) return true;
-  if (d?.kind === 'todos' || d?.kind === 'markdown') return true;
+  if (d?.kind === 'todos' || d?.kind === 'markdown' || d?.kind === 'image') return true;
   return false;
 }
 
@@ -514,6 +515,13 @@ function toolBody(item) {
     return body;
   }
   if (d?.kind === 'diff') body.innerHTML = diffTable(d);
+  else if (d?.kind === 'image') {
+    const src = `/api/shot/${encodeURIComponent(d.name)}?t=${encodeURIComponent(token)}`;
+    const img = h('img', { class: 'shot', src, alt: 'Screenshot of the page', loading: 'lazy' });
+    img.addEventListener('click', () => openShot(src));
+    body.append(img);
+    if (d.text) body.append(h('details', { class: 'shot-report' }, h('summary', null, 'Page report'), h('div', { class: 'term' }, d.text)));
+  }
   else if (d?.kind === 'todos') body.append(todoList(d.todos));
   else if (d?.kind === 'markdown') body.append(h('div', { class: 'md', html: renderMarkdown(d.text) }));
   else if (item.name === 'Task') body.append(h('div', { class: 'md', html: renderMarkdown(item.result.content) }));
@@ -931,6 +939,27 @@ function permissionCard(p) {
     actions,
     h('div', { class: 'card-feedback' }, fb, sendFb),
   );
+}
+
+/** Full-size screenshot over the app (click or Esc closes it). */
+function openShot(src) {
+  const overlay = $('overlay');
+  clear(overlay);
+  overlay.classList.remove('hidden');
+  const close = () => {
+    overlay.classList.add('hidden');
+    clear(overlay);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  };
+  document.addEventListener('keydown', onKey, true);
+  overlay.onclick = close;
+  overlay.append(h('img', { class: 'shot-full', src, alt: 'Screenshot of the page' }));
 }
 
 // Lines of a proposed edit shown inside the approval card; "Review" opens the whole change.

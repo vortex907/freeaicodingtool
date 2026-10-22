@@ -81,8 +81,12 @@ export function leanView(messages: ChatMessage[], opts: LeanOptions): ChatMessag
   const keep = new Set([...lastN(current, keepCurrent), ...lastN(toolIdx, keepLatest)]);
   const labels = new Map<string, string>();
   for (const m of messages) for (const tc of m.toolCalls ?? []) labels.set(tc.id, describeCall(tc.name, tc.arguments));
+  // Only the newest screenshot is worth its tokens; older ones are described by their tool results.
+  let lastShot = -1;
+  messages.forEach((m, i) => m.meta?.kind === 'screenshot' && m.images?.length && (lastShot = i));
   return messages.map((m, i) => {
     const earlier = (m.meta?.turn ?? opts.turn) < opts.turn;
+    if (m.meta?.kind === 'screenshot' && i !== lastShot) return { ...m, images: undefined, content: '[An older screenshot was here.]' };
     if (m.role === 'assistant' && m.reasoning) return { ...m, reasoning: undefined };
     if (m.role === 'tool' && !m.meta?.pruned && !keep.has(i) && m.content.length > (earlier ? maxEarlier : maxCurrent)) {
       const what = labels.get(m.toolCallId ?? '') ?? m.toolName ?? 'a tool';

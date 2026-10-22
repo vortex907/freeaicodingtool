@@ -60,7 +60,7 @@ export function ruleMatches(rule: string, req: PermissionRequest, projectRoot: s
     if (path.isAbsolute(r.spec)) return matchGlob(r.spec.split(path.sep).join('/'), req.path.split(path.sep).join('/'));
     return matchGlob(spec, rel);
   }
-  if (tool === 'WebFetch') {
+  if (tool === 'WebFetch' || tool === 'Browser') {
     const d = r.spec.replace(/^domain:/, '');
     return !!req.domain && (req.domain === d || req.domain.endsWith('.' + d));
   }

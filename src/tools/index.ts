@@ -6,6 +6,7 @@ import { GlobTool, GrepTool, LSTool } from './searchTools.js';
 import { WebFetchTool, WebSearchTool } from './webTools.js';
 import { AskUserTool, ExitPlanModeTool, TaskTool, TodoWriteTool } from './metaTools.js';
 import { SkillTool } from './skillTool.js';
+import { BrowserTool } from './browserTool.js';
 
 export const BUILTIN_TOOLS: Tool[] = [
   ReadTool,
@@ -20,6 +21,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   LSTool,
   WebFetchTool,
   WebSearchTool,
+  BrowserTool,
   TodoWriteTool,
   TaskTool,
   AskUserTool,
@@ -45,7 +47,7 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   let tools = [...BUILTIN_TOOLS, ...(opts.extra ?? [])];
   if (opts.depth > 0) {
     const explore = opts.agentType === 'explore';
-    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'TodoWrite'])]);
+    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'TodoWrite'])]);
     tools = tools.filter((t) => allowed.has(t.name) || t.category === 'mcp');
   } else {
     if (!opts.planMode) tools = tools.filter((t) => t.name !== 'ExitPlanMode');

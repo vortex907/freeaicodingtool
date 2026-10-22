@@ -103,6 +103,9 @@ export function renderToolResult(result: ToolResult, width: number): string[] {
       case 'markdown':
         body = renderMarkdown(d.text, w);
         break;
+      case 'image':
+        body = [c.dim(`Screenshot: ${d.summary ?? 'taken'}`), ...summarizeOutputLines(d.text ?? '', 6, w, true)];
+        break;
       case 'none':
         body = [];
         break;

@@ -196,6 +196,8 @@ export function toWireMessages(messages: ChatMessage[], opts: WireOptions): Wire
         break;
       }
       case 'user':
+        // Screenshots only help models that can see them; the tool result already has the written report.
+        if (m.meta?.kind === 'screenshot' && !model.vision) break;
         pushUser(m.content, m.images);
         break;
       case 'assistant': {

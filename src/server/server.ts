@@ -17,6 +17,7 @@ import { readGlobalConfig, updateGlobalConfig, updateProjectSettings } from '../
 import { clearSkillsCache, loadSkills } from '../skills/skills.js';
 import { DEFAULT_MARKETPLACES, fetchCatalog, installSkill, installedFrom, parseSource, removeSkill } from '../skills/marketplace.js';
 import { Updater } from '../update/updater.js';
+import { screenshotPath } from '../browser/browser.js';
 
 export interface ServerOptions {
   cwd: string;
@@ -162,6 +163,15 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       }
       if (req.method === 'POST' && !(req.headers['content-type'] ?? '').includes('application/json')) {
         json(res, 415, { error: 'expected application/json' });
+        return;
+      }
+      const shot = req.method === 'GET' ? /^\/api\/shot\/([\w-]+\.jpg)$/.exec(p) : null;
+      if (shot) {
+        // Browser tool screenshots shown in the chat.
+        const file = screenshotPath(shot[1]!);
+        const data = file ? await fsp.readFile(file).catch(() => null) : null;
+        if (!data) res.writeHead(404).end('Not found');
+        else res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' }).end(data);
         return;
       }
       const body = req.method === 'POST' ? await readBody(req) : {};

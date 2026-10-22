@@ -17,6 +17,8 @@ import { estimateRequestTokens } from '../util/tokens.js';
 import { SUMMARY_INSTRUCTIONS, findCutIndex, hardTruncate, leanView, pruneToolOutputs, summaryMessage, transcript } from './compaction.js';
 import { runHooks } from './hooks.js';
 import { plainPunctuation } from '../shared/punctuation.js';
+import { previewAfterEdit } from '../tools/browserTool.js';
+import { strParam } from '../tools/types.js';
 import type { McpManager } from '../mcp/manager.js';
 import { debug } from '../util/log.js';
 import { truncate } from '../util/strings.js';
@@ -106,7 +108,7 @@ export function asksAboutCurrentInfo(text: string): boolean {
 
 /** Hidden note for UI work: weak models skip the design rules unless reminded at the end of the request. */
 export const DESIGN_REMINDER =
-  '<system-reminder>This involves a user interface. Follow the Design taste rules: one accent color on neutral tones, a small type scale, spacing in multiples of 4 or 8 px, visible hover and focus states, real copy, SVG icons (no emoji), no generic gradient look. Before you finish, check the result against these rules and fix what falls short.</system-reminder>';
+  '<system-reminder>This involves a user interface. Follow the Design taste rules: one accent color on neutral tones, a small type scale, spacing in multiples of 4 or 8 px, visible hover and focus states, real copy, SVG icons (no emoji), no generic gradient look. Before you finish, check the result against these rules and fix what falls short; for web UIs, open the page with the Browser tool and fix what its report finds.</system-reminder>';
 
 export function isUiWork(text: string): boolean {
   if (text.length > 4000) return false;
@@ -437,10 +439,27 @@ export class Agent {
       if (batch.length > 1) await Promise.all(batch.map(run));
       else await run(batch[0]!);
     }
+    // UI files changed while a Browser page is open: reload it and tell the model what broke.
+    const edits = calls.filter((c) => /^(Write|Edit|MultiEdit)$/.test(c.name) && results.get(c.id) && !results.get(c.id)!.isError);
+    if (edits.length && !signal.aborted) {
+      const paths = edits.map((c) => strParam(parseToolArguments(c.arguments).value, 'file_path', 'path', 'filePath') ?? '');
+      const note = await previewAfterEdit(this.opts.session, paths);
+      if (note) {
+        const last = edits[edits.length - 1]!;
+        const r = results.get(last.id)!;
+        results.set(last.id, { ...r, content: `${r.content}\n\n${note}` });
+      }
+    }
+    const images: ImageAttachment[] = [];
     for (const c of calls) {
       const r = results.get(c.id) ?? { content: 'No result.', isError: true };
       this.messages.push({ role: 'tool', toolCallId: c.id, toolName: c.name, content: r.content, isError: r.isError, meta: { turn: this.turn, display: compactDisplay(r.display) } });
       this.opts.session.toolSeq = (this.opts.session.toolSeq ?? 0) + 1;
+      if (r.images?.length) images.push(...r.images);
+    }
+    // Tool messages can't carry images, so screenshots follow in one message (skipped for text-only models).
+    if (images.length) {
+      this.messages.push({ role: 'user', content: images.length > 1 ? 'Screenshots from the Browser calls above.' : 'Screenshot from the Browser call above.', images: images.slice(-2), meta: { synthetic: true, kind: 'screenshot', turn: this.turn } });
     }
     if (signal.aborted) throw new ProviderError('aborted', 'Aborted');
     return denied ? 'denied' : 'ok';

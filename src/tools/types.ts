@@ -1,7 +1,7 @@
 // Tool interfaces shared by the agent, the permission engine and the UI.
 import type { Settings } from '../config/config.js';
 import type { FileTracker } from './fileTracker.js';
-import type { ToolSchema } from '../providers/types.js';
+import type { ImageAttachment, ToolSchema } from '../providers/types.js';
 
 export type ToolCategory = 'read' | 'edit' | 'execute' | 'network' | 'meta' | 'mcp';
 
@@ -37,6 +37,8 @@ export type ToolDisplay =
   | { kind: 'summary'; text: string }
   | { kind: 'todos'; todos: Todo[] }
   | { kind: 'markdown'; text: string }
+  /** A screenshot saved under ~/.freecode/screenshots (served at /api/shot/<name>) with its report. */
+  | { kind: 'image'; name: string; text?: string; summary?: string }
   | { kind: 'none' };
 
 export interface DiffLine {
@@ -65,6 +67,8 @@ export interface ToolResult {
   /** Text sent back to the model */
   content: string;
   isError?: boolean;
+  /** Images for vision models (sent in a message after the tool results). */
+  images?: ImageAttachment[];
   /** What the UI shows under the tool call */
   display?: ToolDisplay;
 }

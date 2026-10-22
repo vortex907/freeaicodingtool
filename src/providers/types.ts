@@ -24,7 +24,7 @@ export interface MessageMeta {
   ts?: number;
   /** Synthetic messages are inserted by FreeCode (summaries, nudges). */
   synthetic?: boolean;
-  kind?: 'summary' | 'nudge' | 'interrupted' | 'queued' | 'command' | 'memory' | 'bash' | 'attachment';
+  kind?: 'summary' | 'nudge' | 'interrupted' | 'queued' | 'command' | 'memory' | 'bash' | 'attachment' | 'screenshot';
   /** Turn index this message belongs to. */
   turn?: number;
   /** Tool result was pruned during compaction. */
