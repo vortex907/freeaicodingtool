@@ -684,7 +684,13 @@ function highlightMentions(text) {
 function renderItemEl(item) {
   switch (item.kind) {
     case 'user':
-      return h('div', { class: `msg-user ${item.queued ? 'queued' : ''}`, 'data-id': item.id }, item.queued ? h('span', { class: 'q-tag' }, 'Sent while the agent was working') : null, highlightMentions(item.text));
+      return h(
+        'div',
+        { class: `msg-user ${item.queued ? 'queued' : ''}`, 'data-id': item.id },
+        item.queued ? h('span', { class: 'q-tag' }, 'Sent while the agent was working') : null,
+        highlightMentions(item.text),
+        item.images ? h('div', { class: 'u-images' }, icon('image', 'svg-sm'), `${item.images} image${item.images === 1 ? '' : 's'} attached`) : null,
+      );
     case 'assistant': {
       const wrap = h('div', { class: `msg-assistant ${item.discarded ? 'discarded' : ''}`, 'data-id': item.id });
       if (item.reasoning && S.state?.settings?.showReasoning !== false) wrap.append(thinkingBlock(item));
@@ -1287,10 +1293,62 @@ function autoGrow(ta) {
   ta.style.height = `${Math.min(300, ta.scrollHeight)}px`;
 }
 
+// Pasted or dropped images waiting to be sent with the next message.
+S.images = [];
+
+/** Reads an image file, shrinking very large ones (they cost tokens and upload time). */
+function addImage(file) {
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) return toast('Only PNG, JPEG, GIF and WebP images can be attached', 'err');
+  if (S.images.length >= 4) return toast('Up to 4 images per message', 'err');
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      let src = reader.result;
+      const max = 2000;
+      if ((img.width > max || img.height > max || file.size > 4_000_000) && file.type !== 'image/gif') {
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.width * scale);
+        c.height = Math.round(img.height * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        src = c.toDataURL('image/jpeg', 0.9);
+      }
+      const m = /^data:([^;]+);base64,(.*)$/.exec(src);
+      if (!m) return;
+      S.images.push({ mediaType: m[1], data: m[2], src });
+      renderImageStrip();
+      updateSendBtn();
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function renderImageStrip() {
+  const strip = $('composer-images');
+  if (!strip) return;
+  clear(strip);
+  S.images.forEach((im, i) => {
+    const x = h('button', { title: 'Remove image', type: 'button' }, icon('x', 'svg-sm'));
+    x.addEventListener('click', () => {
+      S.images.splice(i, 1);
+      renderImageStrip();
+      updateSendBtn();
+    });
+    strip.append(h('div', { class: 'c-img' }, h('img', { src: im.src, alt: 'Attached image' }), x));
+  });
+}
+
 async function send(text) {
   const t = text.trim();
-  if (!t) return;
-  S.history.push(t);
+  const images = S.images.map(({ mediaType, data }) => ({ mediaType, data }));
+  if (!t && !images.length) return;
+  if (images.length) {
+    S.images = [];
+    renderImageStrip();
+  }
+  if (t) S.history.push(t);
   S.historyIdx = -1;
   if (t === '/help' || t === '?') {
     showHelp();
@@ -1301,7 +1359,7 @@ async function send(text) {
     return;
   }
   try {
-    const r = await api.post('/api/prompt', { text: t });
+    const r = await api.post('/api/prompt', images.length ? { text: t, images } : { text: t });
     if (!r.ok && r.error) toast(r.error, 'err');
     if (r.action === 'setup' || r.action === 'settings') openSettings(ctx, 'providers');
     if (r.action === 'help') showHelp();
@@ -1344,7 +1402,27 @@ function renderComposer() {
     });
     ta.addEventListener('keydown', (e) => composerKey(e, ta));
     ta.addEventListener('blur', () => setTimeout(() => menu?.kind === 'inline' && closeMenu(), 150));
-    const box = h('div', { class: 'composer', id: 'composer' }, ta, h('div', { class: 'composer-bar', id: 'composer-bar' }));
+    // Paste or drop a screenshot or design to attach it.
+    ta.addEventListener('paste', (e) => {
+      const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+      if (!files.length) return;
+      e.preventDefault();
+      files.forEach(addImage);
+    });
+    const box = h('div', { class: 'composer', id: 'composer' }, h('div', { class: 'composer-images', id: 'composer-images' }), ta, h('div', { class: 'composer-bar', id: 'composer-bar' }));
+    box.addEventListener('dragover', (e) => {
+      if (![...(e.dataTransfer?.items || [])].some((it) => it.kind === 'file')) return;
+      e.preventDefault();
+      box.classList.add('dragging');
+    });
+    box.addEventListener('dragleave', () => box.classList.remove('dragging'));
+    box.addEventListener('drop', (e) => {
+      box.classList.remove('dragging');
+      const files = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/'));
+      if (!files.length) return;
+      e.preventDefault();
+      files.forEach(addImage);
+    });
     clear(wrap).append(h('div', { class: 'queued-list', id: 'queued' }), box, h('div', { class: 'composer-hint' }, 'Enter to send · Shift+Enter new line · @ files · / commands · ! shell'));
   }
   $('composer').className = `composer mode-${mode}`;
@@ -1431,7 +1509,7 @@ function updateSendBtn() {
   } else {
     b.className = 'send-btn';
     b.title = busy ? 'Queue message' : 'Send (Enter)';
-    b.disabled = !t.value.trim();
+    b.disabled = !t.value.trim() && !S.images.length;
     b.append(icon('arrowUp'));
   }
 }

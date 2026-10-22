@@ -349,6 +349,15 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 .cp-rewind { flex: none; color: var(--muted); }
 .cp-rewind.armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 8%, transparent); }
 
+/* images pasted or dropped into the composer */
+.composer-images { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 12px 0; }
+.composer-images:empty { display: none; }
+.c-img { position: relative; width: 64px; height: 64px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); background: var(--code-bg); }
+.c-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.c-img button { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 6px; border: none; background: rgba(0, 0, 0, .6); color: #fff; display: grid; place-items: center; cursor: pointer; padding: 0; }
+.composer.dragging { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.u-images { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+
 /* Browser tool screenshots */
 .shot { display: block; max-width: 100%; max-height: 360px; border-radius: 10px; border: 1px solid var(--border-soft); background: var(--code-bg); cursor: zoom-in; margin: 2px 0 8px; }
 .shot-report summary { cursor: pointer; color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }

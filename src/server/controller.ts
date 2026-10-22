@@ -26,6 +26,7 @@ import { truncate } from '../util/strings.js';
 import { debug } from '../util/log.js';
 import { VERSION } from '../version.js';
 import { COMMIT_PROMPT, WORKFLOWS, findWorkflow } from '../agent/workflows.js';
+import type { ImageAttachment } from '../providers/types.js';
 
 export type UIItem =
   | { kind: 'user'; id: string; text: string; ts?: number; queued?: boolean }
@@ -325,9 +326,10 @@ export class Controller {
 
   // ------------------------------------------------------------------ prompts
 
-  async prompt(text: string): Promise<{ ok: boolean; queued?: boolean; error?: string }> {
-    const t = text.trim();
+  async prompt(text: string, images: ImageAttachment[] = []): Promise<{ ok: boolean; queued?: boolean; error?: string }> {
+    const t = text.trim() || (images.length ? 'Here is an image.' : '');
     if (!t) return { ok: false, error: 'empty' };
+    if (this.busy && images.length) return { ok: false, error: 'Wait for the current task to finish (or stop it) before sending images.' };
     if (this.busy) {
       if (t.startsWith('/')) return { ok: false, error: 'Wait for the current task to finish (or stop it) before running commands.' };
       this.app.agent.enqueue(t);
@@ -348,18 +350,18 @@ export class Controller {
       this.toast('info', `Saved note to AGENTS.md: ${t.slice(1).trim()}`);
       return { ok: true };
     }
-    void this.runTurn(text, text);
+    void this.runTurn(t, t, images);
     return { ok: true };
   }
 
-  private async runTurn(text: string, display: string): Promise<void> {
+  private async runTurn(text: string, display: string, images: ImageAttachment[] = []): Promise<void> {
     if (!this.app.usableModelCount().models) {
       this.toast('error', 'No AI model is available yet. Open Settings → Providers and add a free API key (Gemini, Groq, OpenRouter, Mistral, NVIDIA...).');
       return;
     }
     this.extraItems = [];
     this.turnStartIndex = this.app.agent.messages.length;
-    const user: UIItem = { kind: 'user', id: nextId('u'), text: display, ts: Date.now() };
+    const user: UIItem = { kind: 'user', id: nextId('u'), text: display, ts: Date.now(), ...(images.length ? { images: images.length } : {}) };
     this.turnUser = user;
     this.busy = true;
     this.liveEvents = [];
@@ -372,7 +374,8 @@ export class Controller {
         this.liveEvents.push(note);
         this.broadcast(note);
       }
-      await this.app.agent.runTurn(exp.content, { images: exp.images.length ? exp.images : undefined });
+      const all = [...images, ...exp.images];
+      await this.app.agent.runTurn(exp.content, { images: all.length ? all : undefined });
     } catch (e) {
       debug('controller', 'turn failed', e);
       this.toast('error', `Unexpected error: ${(e as Error).message}`);

@@ -201,8 +201,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           st.pendingTrust = pendingTrust;
           return json(res, 200, st);
         }
-        case 'POST /api/prompt':
-          return json(res, 200, await controller.prompt(s('text')));
+        case 'POST /api/prompt': {
+          // Pasted or dropped images: up to 4, each under 8 MB of base64.
+          const images = (Array.isArray(body.images) ? body.images : [])
+            .filter((im): im is { mediaType: string; data: string } => !!im && typeof im.data === 'string' && /^image\/(png|jpeg|gif|webp)$/.test(String(im.mediaType)) && im.data.length < 8_000_000)
+            .slice(0, 4)
+            .map((im) => ({ mediaType: im.mediaType, data: im.data }));
+          return json(res, 200, await controller.prompt(s('text'), images));
+        }
         case 'POST /api/stop':
           controller.stop();
           return json(res, 200, { ok: true });

@@ -143,6 +143,8 @@ export class Router {
     const w = COMPLEXITY_WEIGHTS[profile.complexity] ?? COMPLEXITY_WEIGHTS.moderate!;
     const minOutput = req.purpose === 'classify' ? 64 : req.purpose === 'title' ? 32 : 1024;
     const needInput = Math.ceil(estTokens * 1.1) + minOutput;
+    // Images in the recent messages (a pasted design, a Browser screenshot) need a model that can see them.
+    const wantsVision = req.messages.slice(-6).some((msg) => msg.images?.length);
     const out: Candidate[] = [];
     for (const { p, m } of this.allModels()) {
       if (req.exclude?.has(m.key)) continue;
@@ -171,6 +173,7 @@ export class Router {
         if (h?.tokensPerSec) speed = speed * 0.5 + Math.min(100, h.tokensPerSec / 2) * 0.5;
         score = m.quality * w.q + speed * w.s;
         if (profile.needsReasoning && m.reasoning) score += 4;
+        if (wantsVision) score += m.vision ? 20 : -20;
         if (profile.longContext) score += Math.log2(Math.max(1, m.context / 65536)) * 3;
         if (req.purpose === 'subagent') score += speed * 0.1;
         // Keep scarce daily quotas for the hard tasks.
