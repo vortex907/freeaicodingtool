@@ -166,9 +166,28 @@ export class Controller {
 
   // ------------------------------------------------------------------ events
 
+  /**
+   * Keeps the events of the running turn for windows that connect mid-turn. Streamed text arrives in
+   * thousands of tiny pieces, so consecutive pieces are merged, and only the latest progress line of
+   * a tool is kept.
+   */
+  private bufferLive(msg: { type: string; event: AgentEvent }): void {
+    const e = msg.event;
+    const last = this.liveEvents[this.liveEvents.length - 1] as { type: string; event: AgentEvent } | undefined;
+    if (last && (e.type === 'text' || e.type === 'reasoning') && last.event.type === e.type) {
+      last.event = { ...e, delta: (last.event as typeof e).delta + e.delta };
+      return;
+    }
+    if (last && e.type === 'tool_progress' && last.event.type === 'tool_progress' && last.event.id === e.id) {
+      last.event = e;
+      return;
+    }
+    this.liveEvents.push(msg);
+  }
+
   private onAgentEvent(e: AgentEvent): void {
     const msg = { type: 'agent', event: e };
-    if (this.busy) this.liveEvents.push(msg);
+    if (this.busy) this.bufferLive(msg);
     this.broadcast(msg);
     if (e.type === 'todos' || e.type === 'usage' || e.type === 'compact') this.pushState();
   }

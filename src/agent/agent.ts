@@ -14,7 +14,7 @@ import type { FileTracker } from '../tools/fileTracker.js';
 import { decide, type PermissionContext } from '../permissions/permissions.js';
 import { parseToolArguments } from '../util/jsonRepair.js';
 import { estimateRequestTokens } from '../util/tokens.js';
-import { SUMMARY_INSTRUCTIONS, findCutIndex, hardTruncate, pruneToolOutputs, summaryMessage, transcript } from './compaction.js';
+import { SUMMARY_INSTRUCTIONS, findCutIndex, hardTruncate, leanView, pruneToolOutputs, summaryMessage, transcript } from './compaction.js';
 import { runHooks } from './hooks.js';
 import type { McpManager } from '../mcp/manager.js';
 import { debug } from '../util/log.js';
@@ -165,8 +165,13 @@ export class Agent {
     const tools = this.currentTools().map(toolSchema);
     const system = estimateRequestTokens([{ role: 'system', content: sys }]);
     const toolsT = estimateRequestTokens([], tools);
-    const msgs = estimateRequestTokens(this.messages);
+    const msgs = estimateRequestTokens(this.requestView());
     return { total: system + toolsT + msgs, system, tools: toolsT, messages: msgs };
+  }
+
+  /** What the model gets to see (old, large tool outputs trimmed; see leanView). */
+  requestView(): ChatMessage[] {
+    return leanView(this.messages, { turn: this.turn });
   }
 
   /** Runs one user turn to completion. */
@@ -227,7 +232,7 @@ export class Agent {
         await this.maybeCompact(signal);
         const tools = this.currentTools();
         const sys = await this.systemPrompt();
-        const requestMessages: ChatMessage[] = [{ role: 'system', content: sys }, ...this.messages];
+        const requestMessages: ChatMessage[] = [{ role: 'system', content: sys }, ...this.requestView()];
         let hadOutput = false;
         const result = await this.opts.router.complete(
           {
@@ -423,6 +428,7 @@ export class Agent {
     for (const c of calls) {
       const r = results.get(c.id) ?? { content: 'No result.', isError: true };
       this.messages.push({ role: 'tool', toolCallId: c.id, toolName: c.name, content: r.content, isError: r.isError, meta: { turn: this.turn, display: compactDisplay(r.display) } });
+      this.opts.session.toolSeq = (this.opts.session.toolSeq ?? 0) + 1;
     }
     if (signal.aborted) throw new ProviderError('aborted', 'Aborted');
     return denied ? 'denied' : 'ok';

@@ -10,7 +10,7 @@ import { stripAnsi } from '../util/ansi.js';
 import { formatDuration, randomId, truncate, truncateMiddle } from '../util/strings.js';
 import { invalidateFileListCache } from './listFiles.js';
 
-const MAX_OUTPUT_FOR_MODEL = 30_000;
+const MAX_OUTPUT_FOR_MODEL = 20_000;
 const MAX_CAPTURE = 4 * 1024 * 1024;
 
 const INTERACTIVE: { re: RegExp; hint: string }[] = [

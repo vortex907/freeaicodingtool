@@ -76,6 +76,7 @@ export class App {
       todos: [],
       shells: new Map(),
       shellCounter: 0,
+      toolSeq: 0,
       permissionMode: this.opts.permissionMode ?? this.settings.permissions.mode ?? 'default',
     };
     if (this.opts.model && this.opts.model !== 'auto') this.pinnedModel = this.opts.model;

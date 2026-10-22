@@ -86,6 +86,8 @@ export interface SessionState {
   todos: Todo[];
   shells: Map<string, BackgroundShell>;
   shellCounter: number;
+  /** Number of tool results so far (lets Read spot a re-read of something still in view). */
+  toolSeq?: number;
   permissionMode: Settings['permissions']['mode'];
   /** Set by ExitPlanMode when the user approves a plan. */
   planApproved?: boolean;

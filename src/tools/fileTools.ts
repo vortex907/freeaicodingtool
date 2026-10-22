@@ -12,7 +12,7 @@ import { fuzzyScore } from '../util/strings.js';
 const MAX_READ_BYTES = 20 * 1024 * 1024;
 const DEFAULT_READ_LINES = 2000;
 const MAX_LINE_CHARS = 2000;
-const MAX_READ_CHARS = 60_000;
+const MAX_READ_CHARS = 40_000;
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svgz', '.tiff']);
 const BINARY_EXT = new Set(['.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.exe', '.dll', '.so', '.dylib', '.class', '.jar', '.pyc', '.o', '.a', '.wasm', '.mp3', '.mp4', '.mov', '.avi', '.mkv', '.wav', '.flac', '.ogg', '.woff', '.woff2', '.ttf', '.otf', '.eot', '.sqlite', '.db', '.bin']);
@@ -114,11 +114,18 @@ export const ReadTool: Tool = {
         if (st.size > MAX_READ_BYTES && offset === 1 && !limitRaw) {
           return fail(`File is too large to read at once (${formatBytes(st.size)}). Use offset and limit to read part of it, or Grep to search it.`);
         }
+        // Re-reading the same unchanged lines moments later only costs tokens: point back to them instead.
+        const range = `${offset}:${limitRaw ?? ''}:${end ?? ''}`;
+        const seq = ctx.session.toolSeq ?? 0;
+        if (ctx.files.shownRecently(abs, range, seq)) {
+          return ok(`<system-note>${abs} has not changed since you read these lines a few steps ago; that result is still above. Use it instead of reading again.</system-note>`, { kind: 'summary', text: 'Unchanged since the last read' });
+        }
         const buf = await fsp.readFile(abs);
         if (isBinaryBuffer(buf)) return fail(`${abs} appears to be a binary file and cannot be read as text.`);
         let text = buf.toString('utf8');
         if (ext === '.ipynb') text = renderNotebook(text);
         ctx.files.recordRead(abs);
+        ctx.files.recordView(abs, range, seq);
         if (!text.length) return ok(`<system-note>The file ${abs} exists but is empty.</system-note>`, { kind: 'summary', text: 'Read 0 lines (empty file)' });
         const allLines = text.split(/\r?\n/);
         if (allLines.length > 1 && allLines[allLines.length - 1] === '') allLines.pop();

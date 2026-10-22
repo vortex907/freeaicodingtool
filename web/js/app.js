@@ -537,6 +537,46 @@ function renderToolItem(item) {
   return el;
 }
 
+/**
+ * The model's reasoning: open and streaming (newest lines visible) while it thinks, then folded to
+ * "Thought for 12s" with a one-line preview. Your open/closed choice is remembered.
+ */
+function thinkingBlock(item) {
+  const live = item.streaming && !item.text;
+  const secs = item.thoughtMs && item.thoughtMs >= 1000 ? fmtDuration(item.thoughtMs) : null;
+  const open = live ? !S.ui.closed.has(item.id) : S.ui.open.has(item.id);
+  const text = live && item.reasoning.length > 6000 ? `…${item.reasoning.slice(-6000)}` : item.reasoning;
+  const label = live ? h('span', { class: 'w-text' }, 'Thinking') : h('span', null, secs ? `Thought for ${secs}` : 'Thought');
+  const preview = !live && !open ? h('span', { class: 't-preview' }, firstThought(item.reasoning)) : null;
+  const timer = live && item.thinkingSince ? h('span', { class: 't-timer', 'data-since': String(item.thinkingSince) }, fmtDuration(Date.now() - item.thinkingSince)) : null;
+  const body = h('div', { class: `t-body ${live ? 'live' : ''}` }, text);
+  const det = h('details', { class: `thinking ${live ? 'live' : ''}`, ...(open ? { open: '' } : {}) }, h('summary', null, icon('sparkle', 'svg-sm'), label, timer, preview, icon('chevronDown', 'svg-sm chev')), body);
+  det.addEventListener('toggle', () => {
+    const set = live ? S.ui.closed : S.ui.open;
+    if (det.open === live) set.delete(item.id);
+    else set.add(item.id);
+    if (!live) replaceItem(item);
+  });
+  if (live) requestAnimationFrame(() => (body.scrollTop = body.scrollHeight));
+  return det;
+}
+
+/** First sentence of the reasoning, for the folded preview and the status line. */
+function firstThought(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  const m = /^(.{12,140}?[.!?])(\s|$)/.exec(t);
+  const s = m ? m[1] : t.slice(0, 110);
+  return s.length < t.length && !m ? `${s}…` : s;
+}
+
+/** The newest complete thought, for the status line while the model thinks. */
+function latestThought(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  const sentences = t.split(/(?<=[.!?])\s+/).filter((x) => x.length > 8);
+  const last = sentences.length > 1 && !/[.!?]$/.test(t) ? sentences[sentences.length - 2] : sentences[sentences.length - 1] || t;
+  return last.length > 110 ? `${last.slice(0, 107)}…` : last;
+}
+
 function renderRoute(item) {
   const tries = item.tries || [];
   const searching = item.open && !!S.state?.busy;
@@ -588,13 +628,18 @@ function renderItemEl(item) {
       return h('div', { class: `msg-user ${item.queued ? 'queued' : ''}`, 'data-id': item.id }, item.queued ? h('span', { class: 'q-tag' }, 'Sent while the agent was working') : null, highlightMentions(item.text));
     case 'assistant': {
       const wrap = h('div', { class: `msg-assistant ${item.discarded ? 'discarded' : ''}`, 'data-id': item.id });
-      if (item.reasoning && S.state?.settings?.showReasoning !== false) {
-        const thinking = item.streaming && !item.text;
-        const secs = item.thoughtMs && item.thoughtMs >= 1000 ? fmtDuration(item.thoughtMs) : null;
-        const det = h('details', { class: 'thinking' }, h('summary', null, icon('sparkle', 'svg-sm'), h('span', { class: thinking ? 'w-text' : '' }, thinking ? 'Thinking…' : secs ? `Thought for ${secs}` : 'Thoughts'), icon('chevronDown', 'svg-sm')), h('div', { class: 't-body' }, item.reasoning));
-        wrap.append(det);
-      }
+      if (item.reasoning && S.state?.settings?.showReasoning !== false) wrap.append(thinkingBlock(item));
       if (item.text) wrap.append(h('div', { class: 'md', html: renderMarkdown(item.text) }));
+      if (item.text && !item.streaming && !item.discarded && item.final) {
+        const copy = h('button', { class: 'msg-act', title: 'Copy this answer (Markdown)' }, icon('copy', 'svg-sm'), 'Copy');
+        copy.addEventListener('click', () =>
+          navigator.clipboard?.writeText(item.text).then(() => {
+            copy.lastChild.textContent = 'Copied';
+            setTimeout(() => (copy.lastChild.textContent = 'Copy'), 1200);
+          }),
+        );
+        wrap.append(h('div', { class: 'msg-actions' }, copy));
+      }
       if (item.discarded) wrap.append(h('div', { class: 'note warn' }, 'This partial answer was discarded because the model failed; another model continued.'));
       return wrap;
     }
@@ -692,6 +737,7 @@ function updateWorking(el) {
   else if (a?.text) verb = 'Writing…';
   const model = S.state?.model?.current;
   el.append(h('span', { class: 'spark' }, '✻'), h('span', { class: 'w-text' }, verb), h('span', { class: 'w-meta' }, `${fmtDuration(Date.now() - live.turnStart)} · ↓ ${fmtTokens(live.outChars / 3.5)} tokens${model ? ` · ${model}` : ''} · Esc to stop`));
+  if (a?.reasoning && !a.text) el.append(h('div', { class: 'w-thought' }, latestThought(a.reasoning)));
 }
 
 function renderChat(scroll = false) {
@@ -701,15 +747,62 @@ function renderChat(scroll = false) {
     clear(inner).append(emptyState());
     return;
   }
-  const nodes = S.items.map(elFor);
+  // Copy goes under the final answer of each task only (not under "Let me check…" steps).
+  S.items.forEach((it, i) => {
+    if (it.kind !== 'assistant') return;
+    const next = S.items[i + 1];
+    const final = next ? next.kind === 'user' : !S.state?.busy;
+    if (!!it.final !== final) {
+      it.final = final;
+      touch(it);
+    }
+  });
+  // Long chats: render the latest part; older items render on demand (keeps the page light).
+  const LIMIT = 150;
+  let items = S.items;
+  const hidden = S.ui.showAll ? 0 : Math.max(0, items.length - LIMIT);
+  if (hidden) items = items.slice(hidden);
+  const nodes = items.map(elFor);
+  if (hidden) {
+    const more = h('button', { class: 'show-earlier' }, `Show ${hidden} earlier item${hidden === 1 ? '' : 's'}`);
+    more.addEventListener('click', () => {
+      S.ui.showAll = true;
+      renderChat();
+    });
+    nodes.unshift(more);
+  }
   if (S.state?.busy) nodes.push(workingIndicator());
   inner.replaceChildren(...nodes);
   if (scroll || wasNear) scrollChat(true);
+  updateJumpButton();
 }
+
+function updateJumpButton() {
+  let btn = $('jump-latest');
+  if (!btn) {
+    btn = h('button', { id: 'jump-latest', class: 'jump-latest', title: 'Jump to the latest message' }, icon('arrowUp', 'svg-sm flip'), 'Latest');
+    btn.addEventListener('click', () => {
+      $('chat').scrollTo({ top: $('chat').scrollHeight, behavior: 'smooth' });
+    });
+    $('dock').append(btn);
+  }
+  btn.classList.toggle('show', !nearBottom() && S.items.length > 0);
+}
+
+let jumpQueued = false;
+$('chat').addEventListener('scroll', () => {
+  if (jumpQueued) return;
+  jumpQueued = true;
+  requestAnimationFrame(() => {
+    jumpQueued = false;
+    updateJumpButton();
+  });
+});
 
 setInterval(() => {
   const w = $('working');
   if (w && S.state?.busy) updateWorking(w);
+  for (const t of document.querySelectorAll('.t-timer[data-since]')) t.textContent = fmtDuration(Date.now() - Number(t.dataset.since));
   // refresh running tool timers
   if (S.state?.busy) for (const item of S.items) if (item.kind === 'tool' && item.status === 'running') replaceItem(item);
 }, 500);

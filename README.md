@@ -17,6 +17,11 @@
 - **Skills and a skills marketplace.** It supports Claude-compatible `SKILL.md` skills. Install them in one click from [anthropics/skills](https://github.com/anthropics/skills) or any GitHub repository, and skills in `~/.claude/skills` work too.
 - **Run and Open in.** One click runs your project in a terminal window (`npm run dev`, `dotnet run`, `python main.py`, … detected automatically) or opens it in VS Code, Cursor, Visual Studio, Explorer or a terminal.
 - **Updates itself** from GitHub releases.
+- **Live thinking.** Reasoning models' thoughts stream into a "Thinking" block, and the status line shows the current thought. When the answer starts, the block folds into "Thought for 12s" with a one-line preview.
+- **Lean on tokens:**
+  - Every request is built from a trimmed view of the conversation: large outputs from finished tasks become one-line notes. In a typical multi-task session that sends about two-thirds fewer tokens per step, and your full history is kept.
+  - Re-reading an unchanged file in the same task returns a short note instead of the whole file.
+  - Reasoning is never resent.
 - **Good habits even on small models.** The built-in playbook makes models explore first, plan, make small complete edits and verify them by actually running the code. It also has design rules, so the apps it builds look modern by default.
 - **Safe by default.** It asks before edits and commands, with permission modes and allow/deny rules. Checkpoints let you undo any change. Project settings are ignored until you trust the folder.
 - **Extensible:**

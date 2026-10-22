@@ -38,6 +38,64 @@ export function pruneToolOutputs(messages: ChatMessage[], keepRecent = 6, minCha
   return saved;
 }
 
+/** Short description of a tool call for placeholders, e.g. Read(src/app.ts). */
+export function describeCall(name: string, args: string): string {
+  let a: Record<string, unknown> = {};
+  try {
+    a = JSON.parse(args) as Record<string, unknown>;
+  } catch {
+    // keep empty
+  }
+  const pick = (...keys: string[]) => keys.map((k) => a[k]).find((v) => typeof v === 'string' && v) as string | undefined;
+  const arg = pick('file_path', 'path', 'command', 'pattern', 'url', 'query', 'skill', 'description');
+  return arg ? `${name}(${truncate(arg.replace(/\s+/g, ' '), 70)})` : name;
+}
+
+export interface LeanOptions {
+  /** The current turn number; tool outputs from earlier turns are trimmed harder. */
+  turn: number;
+  /** Tool results of the current turn kept in full regardless of size. */
+  keepCurrent?: number;
+  /** Tool results kept in full regardless of turn (the most recent ones). */
+  keepLatest?: number;
+  /** Size above which an older output becomes a placeholder. */
+  maxEarlier?: number;
+  maxCurrent?: number;
+}
+
+/**
+ * The conversation as sent to the model. Large tool outputs from earlier tasks (and the older ones of
+ * the current task) become one-line placeholders, attachments from earlier tasks are dropped, and
+ * reasoning is never resent. Tool calls stay paired with their results; the full history is kept in
+ * the session for the user. Free tiers resend everything on every step, so this saves most tokens.
+ */
+export function leanView(messages: ChatMessage[], opts: LeanOptions): ChatMessage[] {
+  const keepCurrent = opts.keepCurrent ?? 8;
+  const keepLatest = opts.keepLatest ?? 2;
+  const maxEarlier = opts.maxEarlier ?? 1200;
+  const maxCurrent = opts.maxCurrent ?? 4000;
+  const toolIdx: number[] = [];
+  messages.forEach((m, i) => m.role === 'tool' && toolIdx.push(i));
+  const current = toolIdx.filter((i) => (messages[i]!.meta?.turn ?? opts.turn) >= opts.turn);
+  const lastN = (list: number[], n: number) => (n > 0 ? list.slice(-n) : []); // slice(-0) would keep everything
+  const keep = new Set([...lastN(current, keepCurrent), ...lastN(toolIdx, keepLatest)]);
+  const labels = new Map<string, string>();
+  for (const m of messages) for (const tc of m.toolCalls ?? []) labels.set(tc.id, describeCall(tc.name, tc.arguments));
+  return messages.map((m, i) => {
+    const earlier = (m.meta?.turn ?? opts.turn) < opts.turn;
+    if (m.role === 'assistant' && m.reasoning) return { ...m, reasoning: undefined };
+    if (m.role === 'tool' && !m.meta?.pruned && !keep.has(i) && m.content.length > (earlier ? maxEarlier : maxCurrent)) {
+      const what = labels.get(m.toolCallId ?? '') ?? m.toolName ?? 'a tool';
+      const lines = m.content.split('\n').length;
+      return { ...m, content: `[The output of ${what} (${lines} lines) from ${earlier ? 'an earlier task' : 'earlier in this task'} is not repeated here to save space. Run it again if you need it.]` };
+    }
+    if (m.role === 'user' && earlier && m.content.length > 4000 && /<attached-(file|folder)/.test(m.content)) {
+      return { ...m, content: m.content.replace(/(<attached-(file|folder)\b[^>]*>)[\s\S]*?(<\/attached-\2>)/g, '$1\n[contents omitted; read the file again if you need it]\n$3') };
+    }
+    return m;
+  });
+}
+
 /** Index where the "recent" part starts so that it begins with a user message (never splits tool pairs). */
 export function findCutIndex(messages: ChatMessage[], keepTokens: number): number {
   let acc = 0;

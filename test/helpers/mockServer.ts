@@ -10,7 +10,7 @@ export interface MockCall {
 }
 
 export type MockResponse =
-  | { kind: 'text'; text: string; reasoning?: string; finish?: string }
+  | { kind: 'text'; text: string; reasoning?: string; finish?: string; /** Stream slowly: pause this long between pieces. */ delayMs?: number }
   | { kind: 'tools'; text?: string; calls: MockCall[]; omitIndex?: boolean }
   | { kind: 'error'; status: number; body: unknown; headers?: Record<string, string> }
   | { kind: 'json'; status?: number; body: unknown }
@@ -123,10 +123,19 @@ export class MockServer {
     res.write(': keep-alive\n\n');
     chunk({ role: 'assistant' });
     if (r.kind === 'text') {
-      if (r.reasoning) chunk({ reasoning_content: r.reasoning });
+      const pause = () => (r.delayMs ? new Promise((resolve) => setTimeout(resolve, r.delayMs)) : Promise.resolve());
+      if (r.reasoning) {
+        for (const p of r.delayMs ? (r.reasoning.match(/[\s\S]{1,24}/g) ?? []) : [r.reasoning]) {
+          chunk({ reasoning_content: p });
+          await pause();
+        }
+      }
       // Split text into a few pieces to exercise streaming.
       const pieces = r.text.match(/[\s\S]{1,7}/g) ?? [''];
-      for (const p of pieces) chunk({ content: p });
+      for (const p of pieces) {
+        chunk({ content: p });
+        if (r.delayMs) await pause();
+      }
       chunk({}, r.finish ?? 'stop');
     } else {
       if (r.text) chunk({ content: r.text });
