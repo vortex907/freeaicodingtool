@@ -11,6 +11,8 @@ import { Agent, type AgentUI } from './agent/agent.js';
 import { FileTracker } from './tools/fileTracker.js';
 import type { SessionState } from './tools/types.js';
 import { killAllShells } from './tools/bash.js';
+import { stopReplRuntimes } from './tools/repl.js';
+import { stopDebugSession } from './tools/debugger.js';
 import { McpManager, loadMcpConfigs } from './mcp/manager.js';
 import { loadMemoryFiles, type MemoryFile } from './agent/memory.js';
 import { buildSystemPrompt, environmentSection } from './agent/systemPrompt.js';
@@ -219,6 +221,7 @@ export class App {
     this.agent.currentModelKey = s.modelKey;
     this.agent.totalUsage = s.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     this.agent.requestCount = s.requests ?? 0;
+    this.stopRuntimes();
   }
 
   newSession(): void {
@@ -227,10 +230,18 @@ export class App {
     this.agent.clear();
     this.session.todos = [];
     this.files.reset();
+    this.stopRuntimes();
+  }
+
+  /** REPL variables and a paused debugger belong to one conversation. */
+  private stopRuntimes(): void {
+    stopReplRuntimes(this.session);
+    stopDebugSession(this.session);
   }
 
   shutdown(): void {
     killAllShells(this.session.shells);
+    this.stopRuntimes();
     this.mcp.closeAll();
     this.health.saveNow();
   }

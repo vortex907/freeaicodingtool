@@ -5,7 +5,7 @@
 //         plan         - read-only: no edits or side-effecting commands at all
 //         bypassPermissions ("yolo") - everything runs without asking (catastrophic commands still ask)
 // Rules:  "Tool", "Tool(specifier)". Bash(npm test) exact, Bash(npm run:*) prefix, Edit(src/**) glob,
-//         WebFetch(domain:example.com), mcp__server or mcp__server__tool.
+//         WebFetch(domain:example.com), REPL(python), Debugger(node), mcp__server or mcp__server__tool.
 import * as path from 'node:path';
 import type { PermissionMode } from '../config/config.js';
 import type { PermissionRequest } from '../tools/types.js';
@@ -64,6 +64,7 @@ export function ruleMatches(rule: string, req: PermissionRequest, projectRoot: s
     const d = r.spec.replace(/^domain:/, '');
     return !!req.domain && (req.domain === d || req.domain.endsWith('.' + d));
   }
+  if (req.specifier !== undefined) return r.spec === '*' || r.spec === req.specifier;
   return r.spec === req.subject;
 }
 

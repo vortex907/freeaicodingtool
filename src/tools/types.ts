@@ -25,6 +25,8 @@ export interface PermissionRequest {
   command?: string;
   /** URL / domain for network tools */
   domain?: string;
+  /** What Tool(specifier) rules match for other tools, e.g. "python" for REPL(python) */
+  specifier?: string;
   /** Extra warning for destructive operations */
   danger?: string;
   /** Tool reported it only reads (MCP readOnlyHint, safe bash). */
