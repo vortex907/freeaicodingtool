@@ -1,6 +1,6 @@
 // Bash tool (plus BashOutput / KillShell for background processes).
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { promises as fsp, existsSync } from 'node:fs';
+import { promises as fsp, existsSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { BackgroundShell, PreparedCall, Tool, ToolContext, ToolResult } from './types.js';
@@ -82,9 +82,33 @@ interface SpawnResult {
   newCwd?: string;
 }
 
+/**
+ * Git Bash only puts its own tools (ls, grep, sed, ...) on PATH in login shells. We run `bash -c`,
+ * so add Git's usr\bin and mingw64\bin ourselves.
+ */
+export function gitBashPath(bashPath: string, currentPath: string): string {
+  let root = path.win32.dirname(path.win32.dirname(bashPath)); // ...\Git\bin\bash.exe -> ...\Git
+  if (/\\usr$/i.test(root)) root = path.win32.dirname(root); // ...\Git\usr\bin\bash.exe
+  const extra = [path.win32.join(root, 'usr', 'bin'), path.win32.join(root, 'mingw64', 'bin')];
+  const parts = currentPath.split(';').filter(Boolean);
+  const missing = extra.filter((d) => !parts.some((p) => p.toLowerCase() === d.toLowerCase()));
+  return [...missing, ...parts].join(';');
+}
+
 function shellEnv(ctx: ToolContext): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const sh = detectShell();
+  if (isWindows && sh.kind === 'bash') {
+    // Windows environment names are case-insensitive; keep a single PATH entry.
+    const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'Path';
+    const current = env[key] ?? '';
+    for (const k of Object.keys(env)) if (k.toLowerCase() === 'path' && k !== key) delete env[k];
+    env[key] = gitBashPath(sh.path, current);
+    env.MSYSTEM ??= 'MINGW64';
+    env.CHERE_INVOKING = '1';
+  }
   return {
-    ...process.env,
+    ...env,
     ...ctx.settings.env,
     PAGER: 'cat',
     GIT_PAGER: 'cat',
@@ -102,19 +126,60 @@ function shellEnv(ctx: ToolContext): NodeJS.ProcessEnv {
   };
 }
 
-function buildInvocation(command: string, cwdFile: string | null): { file: string; args: string[] } {
+interface Invocation {
+  file: string;
+  args: string[];
+  /** cmd.exe parses its own command line, so the arguments must reach it unquoted by Node. */
+  verbatim?: boolean;
+  /** Temporary script to delete afterwards. */
+  scriptFile?: string;
+}
+
+/**
+ * PowerShell wrapper: UTF-8 output, the working directory reported back, and a meaningful exit code.
+ * When a program ran, its exit code wins: Windows PowerShell sets $? to false for any program that
+ * writes to stderr under 2>&1, even when it succeeded.
+ */
+export function powershellScript(command: string, cwdFile: string | null): string {
+  const saveCwd = cwdFile ? `try { [IO.File]::WriteAllText('${cwdFile.replace(/'/g, "''")}', (Get-Location).ProviderPath) } catch {}\n` : '';
+  return (
+    '[Console]::OutputEncoding = [Text.Encoding]::UTF8\n' +
+    '$OutputEncoding = [Text.Encoding]::UTF8\n' +
+    '$global:LASTEXITCODE = $null\n' +
+    `${command}\n` +
+    '$__fcOk = $?\n' +
+    saveCwd +
+    'if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n' +
+    'if ($__fcOk) { exit 0 } else { exit 1 }'
+  );
+}
+
+export function buildInvocation(command: string, cwdFile: string | null): Invocation {
   const sh = detectShell();
-  if (sh.kind === 'powershell') return { file: sh.path, args: ['-NoProfile', '-NonInteractive', '-Command', command] };
-  if (sh.kind === 'cmd') return { file: sh.path, args: ['/d', '/s', '/c', command] };
-  const trailer = cwdFile ? `\n__fc_ec=$?\npwd -P > '${cwdFile.replace(/'/g, "'\\''")}' 2>/dev/null\nexit $__fc_ec` : '';
+  if (sh.kind === 'powershell') {
+    // -ExecutionPolicy Bypass lets npm/npx/yarn's .ps1 shims run under the default "Restricted" policy.
+    const base = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'];
+    const script = powershellScript(command, cwdFile);
+    // -EncodedCommand sidesteps every quoting problem; very long scripts go through a temporary file instead.
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    if (encoded.length < 30_000) return { file: sh.path, args: [...base, '-EncodedCommand', encoded] };
+    const scriptFile = path.join(os.tmpdir(), `freecode-${process.pid}-${randomId(8)}.ps1`);
+    writeFileSync(scriptFile, '\ufeff' + script, 'utf8');
+    return { file: sh.path, args: [...base, '-File', scriptFile], scriptFile };
+  }
+  if (sh.kind === 'cmd') return { file: sh.path, args: ['/d', '/s', '/c', `"${command}"`], verbatim: true };
+  // Git Bash: `pwd -W` prints a Windows path (C:/Users/...) that Node understands.
+  const pwd = isWindows ? 'pwd -W' : 'pwd -P';
+  const trailer = cwdFile ? `\n__fc_ec=$?\n${pwd} > '${cwdFile.replace(/'/g, "'\\''")}' 2>/dev/null\nexit $__fc_ec` : '';
   return { file: sh.path, args: ['-c', command + trailer] };
 }
 
 function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutput: (chunk: string) => void): Promise<SpawnResult> {
   return new Promise((resolve) => {
     const started = Date.now();
-    const cwdFile = isWindows ? null : path.join(os.tmpdir(), `freecode-cwd-${process.pid}-${randomId(6)}`);
-    const { file, args } = buildInvocation(command, cwdFile);
+    // cmd.exe can't report its final directory, every other shell can.
+    const cwdFile = detectShell().kind === 'cmd' ? null : path.join(os.tmpdir(), `freecode-cwd-${process.pid}-${randomId(6)}`);
+    const { file, args, verbatim, scriptFile } = buildInvocation(command, cwdFile);
     let cwd = ctx.session.cwd;
     if (!existsSync(cwd)) cwd = ctx.projectRoot;
     const child = spawn(file, args, {
@@ -123,6 +188,7 @@ function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutp
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: !isWindows,
       windowsHide: true,
+      windowsVerbatimArguments: verbatim,
     });
     let output = '';
     let dropped = 0;
@@ -165,6 +231,7 @@ function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutp
           // no cwd info
         }
       }
+      if (scriptFile) await fsp.unlink(scriptFile).catch(() => undefined);
       if (dropped) output += `\n[${dropped} bytes of output were dropped]`;
       resolve({ output, exitCode: code, signal: sig, timedOut, aborted, durationMs: Date.now() - started, newCwd });
     };
@@ -177,13 +244,14 @@ function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutp
 }
 
 function startBackground(command: string, ctx: ToolContext): BackgroundShell {
-  const { file, args } = buildInvocation(command, null);
+  const { file, args, verbatim, scriptFile } = buildInvocation(command, null);
   const child = spawn(file, args, {
     cwd: existsSync(ctx.session.cwd) ? ctx.session.cwd : ctx.projectRoot,
     env: shellEnv(ctx),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: !isWindows,
     windowsHide: true,
+    windowsVerbatimArguments: verbatim,
   });
   const id = `shell_${++ctx.session.shellCounter}`;
   const shell: BackgroundShell = {
@@ -209,6 +277,7 @@ function startBackground(command: string, ctx: ToolContext): BackgroundShell {
   child.on('close', (code) => {
     shell.running = false;
     shell.exitCode = code;
+    if (scriptFile) void fsp.unlink(scriptFile).catch(() => undefined);
   });
   child.on('error', (e) => {
     shell.output += `\n${e.message}`;

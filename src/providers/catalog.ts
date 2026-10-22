@@ -20,7 +20,7 @@ export const PROVIDERS: ProviderDef[] = [
     freeTier: 'Gemini Flash / Flash-Lite and Gemma free tier, 1M-token context, no credit card',
     kind: 'free',
     speed: 75,
-    quirks: { schemaDialect: 'gemini', streamUsage: true, stripModelPrefix: 'models/' },
+    quirks: { schemaDialect: 'gemini', streamUsage: true, stripModelPrefix: 'models/', thoughtSignatures: true },
     models: [
       { id: 'gemini-flash-latest', context: 1048576, maxOutput: 65536, quality: 84, speed: 75, reasoning: true, vision: true, limits: { rpm: 5 } },
       { id: 'gemini-flash-lite-latest', context: 1048576, maxOutput: 65536, quality: 70, speed: 88, reasoning: true, vision: true, limits: { rpm: 15 }, roles: ['router', 'summarizer'] },

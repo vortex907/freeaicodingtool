@@ -226,3 +226,103 @@ test('reports a clear error when every provider fails', async () => {
   assert.equal(r.code, 1);
   assert.match(r.stderr, /rate limited or failing|No AI provider|key/i);
 });
+
+// ------------------------------------------------------------------ failover problems seen in real use
+
+/** Like setup(), but with the real built-in provider definitions (quirks included) pointed at the mock. */
+function setupBuiltin(providers: Record<string, (string | { id: string; quality: number })[]>): Env {
+  const env = setup({});
+  const cfgFile = path.join(env.home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgFile, 'utf8')) as { providers: Record<string, unknown> };
+  for (const [id, models] of Object.entries(providers)) {
+    cfg.providers[id] = {
+      baseURL: server.baseURL(id),
+      apiKey: 'test-key',
+      discover: false,
+      models: models.map((m, i) => ({ id: typeof m === 'string' ? m : m.id, quality: typeof m === 'string' ? 99 - i * 5 : m.quality, context: 100000, maxOutput: 4096, tools: 'native', speed: 90 })),
+    };
+  }
+  writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+  return env;
+}
+
+type WireCall = { id: string; function: { name: string }; extra_content?: { google?: { thought_signature?: string } } };
+const assistantCalls = (body: Record<string, unknown>) =>
+  ((body.messages as { role: string; tool_calls?: WireCall[] }[]) ?? []).filter((m) => m.role === 'assistant' && m.tool_calls).flatMap((m) => m.tool_calls!);
+
+test('Gemini 3: echoes its thought signatures and adds the placeholder for other models\' tool calls', async () => {
+  const env = setupBuiltin({ groq: ['tool-maker'], gemini: [{ id: 'gemini-3-flash-preview', quality: 70 }] });
+  writeFileSync(path.join(env.project, 'a.txt'), 'alpha\n');
+  writeFileSync(path.join(env.project, 'b.txt'), 'beta\n');
+  // Groq makes the first tool call, then hits its limit; Gemini continues the task.
+  server.script('groq', [tools({ name: 'Read', args: { file_path: 'a.txt' } }), rateLimited(60)]);
+  const seen: WireCall[][] = [];
+  server.on('gemini', (req, i) => {
+    const calls = assistantCalls(req.body);
+    seen.push(calls);
+    // What the real API does: tool calls without a signature are rejected.
+    if (calls.some((c) => !c.extra_content?.google?.thought_signature)) {
+      return { kind: 'error', status: 400, body: { error: { code: 400, message: 'Function call is missing a thought_signature in functionCall parts.', status: 'INVALID_ARGUMENT' } } };
+    }
+    if (i === 0) return { kind: 'tools', calls: [{ name: 'Read', args: { file_path: 'b.txt' }, extra: { google: { thought_signature: 'sig-from-gemini' } } }] };
+    return text('Both files read.');
+  });
+  const r = await runCli(env, ['-p', 'read a.txt and then b.txt', '--yolo']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /Both files read/);
+  assert.equal(seen.length, 2, 'no request was rejected');
+  assert.equal(seen[0]![0]!.extra_content?.google?.thought_signature, 'skip_thought_signature_validator', "placeholder on Groq's call");
+  const sigs = seen[1]!.map((c) => c.extra_content?.google?.thought_signature);
+  assert.deepEqual(sigs, ['skip_thought_signature_validator', 'sig-from-gemini'], "Gemini's own signature is sent back");
+  // Other providers never see the Gemini-only field.
+  server.script('groq', [text('done')]);
+});
+
+test('a rejected tool history is resent as plain text instead of giving up on the model', async () => {
+  const env = setup({ th1: { model: 'first', quality: 90 }, th2: { model: 'strict', quality: 80 } });
+  writeFileSync(path.join(env.project, 'notes.md'), '# notes\n');
+  server.script('th1', [tools({ name: 'Read', args: { file_path: 'notes.md' } }), rateLimited(60)]);
+  server.on('th2', (req) => {
+    const msgs = req.body.messages as { role: string; tool_calls?: unknown[] }[];
+    if (msgs.some((m) => m.role === 'tool' || m.tool_calls)) return { kind: 'error', status: 400, body: { error: { message: 'Invalid tool_call history: unexpected function call' } } };
+    return text('Read it via text history.');
+  });
+  const r = await runCli(env, ['-p', 'read notes.md', '--yolo', '--verbose']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /Read it via text history/);
+  const last = server.requestsFor('th2').at(-1)!.body;
+  const msgs = last.messages as { role: string; content: string }[];
+  assert.ok(msgs.some((m) => m.role === 'user' && /notes/.test(m.content)), 'the tool result travels as text');
+  assert.ok(Array.isArray(last.tools), 'native tools stay available');
+});
+
+test("recovers a tool call from Groq's tool_use_failed error", async () => {
+  const env = setup({ tuf: { model: 'oss', quality: 90 } });
+  const failed = '<|channel|>commentary to=functions.Write <|constrain|>json<|message|>{"file_path":"out.txt","content":"ok\\n"}<|call|>';
+  server.script('tuf', [
+    { kind: 'error', status: 400, body: { error: { message: "Failed to call a function. Please adjust your prompt. See 'failed_generation' for more details.", type: 'invalid_request_error', code: 'tool_use_failed', failed_generation: failed } } },
+    text('Wrote out.txt.'),
+  ]);
+  const r = await runCli(env, ['-p', 'write ok to out.txt', '--yolo']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(readFileSync(path.join(env.project, 'out.txt'), 'utf8'), 'ok\n');
+  assert.match(r.stdout, /Wrote out\.txt/);
+});
+
+test('models with zero free quota are benched for days', async () => {
+  const env = setupBuiltin({ gemini: ['gemini-3-pro-preview', 'gemini-3-flash-preview'] });
+  server.on('gemini', (req) => {
+    if (req.body.model === 'gemini-3-pro-preview') {
+      return { kind: 'error', status: 429, body: { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'You exceeded your current quota. * Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-3-pro-preview' } } };
+    }
+    return text(`answer from ${req.body.model}`);
+  });
+  const r = await runCli(env, ['-p', 'explain closures in javascript', '--verbose']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /answer from gemini-/);
+  assert.doesNotMatch(r.stdout, /gemini-3-pro-preview/);
+  assert.match(r.stderr, /no free quota/);
+  const health = JSON.parse(readFileSync(path.join(env.home, 'state', 'health.json'), 'utf8')) as { models: Record<string, { disabledUntil?: number }> };
+  const pro = Object.entries(health.models).find(([k]) => k.endsWith('gemini-3-pro-preview'))?.[1];
+  assert.ok(pro?.disabledUntil && pro.disabledUntil - Date.now() > 2 * 24 * 3600_000, 'benched for days');
+});

@@ -127,8 +127,10 @@ export function buildProviders(settings: Settings, dotenv: Record<string, string
   for (const [id, cfg] of Object.entries(settings.providers ?? {})) {
     if (!defs.some((d) => d.id === id) && cfg?.baseURL) defs.push(customProviderDef(id, cfg));
   }
-  for (const def of defs) {
-    const cfg = settings.providers?.[def.id];
+  for (const catalogDef of defs) {
+    const cfg = settings.providers?.[catalogDef.id];
+    // "discover": false turns live model discovery off for built-in providers too.
+    const def: ProviderDef = cfg?.discover === false && catalogDef.discovery?.type !== 'none' ? { ...catalogDef, discovery: { type: 'none' } } : catalogDef;
     const keys = resolveApiKeys(def, cfg, dotenv);
     let baseURL = normalizeBaseURL(def, cfg, dotenv);
     let unavailableReason: string | undefined;

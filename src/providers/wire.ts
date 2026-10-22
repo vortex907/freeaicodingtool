@@ -15,12 +15,33 @@ export interface WireOptions {
   strict?: boolean;
   /** Merge the system prompt into the first user message. */
   noSystemRole?: boolean;
+  /** Send earlier tool calls and results as plain text (native tools stay available for the reply). */
+  historyAsText?: boolean;
   maxTokens?: number;
   temperature?: number;
   stream?: boolean;
 }
 
 type WireMessage = Record<string, unknown>;
+
+/**
+ * Google's documented placeholder for tool calls Gemini did not make itself (history from another
+ * model). Gemini 3 rejects tool calls without a thought signature otherwise.
+ */
+export const DUMMY_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
+
+/** Gemini 3 and newer (and the moving "-latest" aliases) validate thought signatures. */
+export function validatesThoughtSignatures(modelId: string): boolean {
+  const id = modelId.replace(/^models\//, '');
+  if (/latest/.test(id)) return true;
+  const m = /^gemini-(\d+)/.exec(id);
+  return !!m && Number(m[1]) >= 3;
+}
+
+function hasThoughtSignature(extra: Record<string, unknown> | undefined): boolean {
+  const g = extra?.google as { thought_signature?: unknown } | undefined;
+  return typeof g?.thought_signature === 'string' && !!g.thought_signature;
+}
 
 /** Deterministic 9-char alphanumeric id for providers that require it (Mistral). */
 function mistralId(id: string): string {
@@ -132,6 +153,10 @@ export function sanitizeSchema(schema: unknown, dialect: 'openai' | 'gemini' = '
 export function toWireMessages(messages: ChatMessage[], opts: WireOptions): WireMessage[] {
   const { quirks, toolMode, model } = opts;
   const text = toolMode === 'text';
+  // Earlier tool use rendered as text; in text tool mode everything already is.
+  const textHistory = text || !!opts.historyAsText;
+  const signatures = !!quirks.thoughtSignatures;
+  const placeholders = signatures && validatesThoughtSignatures(model.id);
   let msgs = repairToolPairs(messages);
 
   // Text tool mode: append protocol to system prompt, convert calls/results to text.
@@ -174,21 +199,30 @@ export function toWireMessages(messages: ChatMessage[], opts: WireOptions): Wire
         pushUser(m.content, m.images);
         break;
       case 'assistant': {
-        if (text) {
+        if (textHistory) {
           const parts = [m.content.trim(), ...(m.toolCalls ?? []).map(renderToolCallText)].filter(Boolean);
           if (!parts.length) continue;
-          out.push({ role: 'assistant', content: parts.join('\n\n') });
+          const last = out[out.length - 1];
+          if (last && last.role === 'assistant' && typeof last.content === 'string') last.content = `${last.content}\n\n${parts.join('\n\n')}`;
+          else out.push({ role: 'assistant', content: parts.join('\n\n') });
           break;
         }
         if (m.toolCalls?.length) {
+          // Gemini: send its own signatures back; calls made by other models get the placeholder.
+          const signed = m.toolCalls.some((tc) => hasThoughtSignature(tc.extra));
           out.push({
             role: 'assistant',
             content: m.content ? m.content : quirks.emptyStringContent || opts.strict ? '' : null,
-            tool_calls: m.toolCalls.map((tc) => ({
-              id: sanitizeId(tc.id, quirks),
-              type: 'function',
-              function: { name: tc.name, arguments: tc.arguments && tc.arguments.trim() ? tc.arguments : '{}' },
-            })),
+            tool_calls: m.toolCalls.map((tc) => {
+              const call: WireMessage = {
+                id: sanitizeId(tc.id, quirks),
+                type: 'function',
+                function: { name: tc.name, arguments: tc.arguments && tc.arguments.trim() ? tc.arguments : '{}' },
+              };
+              if (signatures && tc.extra) call.extra_content = tc.extra;
+              else if (placeholders && !signed) call.extra_content = { google: { thought_signature: DUMMY_THOUGHT_SIGNATURE } };
+              return call;
+            }),
           });
         } else {
           if (!m.content.trim()) continue; // empty assistant turns are rejected by several providers
@@ -200,7 +234,7 @@ export function toWireMessages(messages: ChatMessage[], opts: WireOptions): Wire
         break;
       }
       case 'tool': {
-        if (text) {
+        if (textHistory) {
           pushUser(renderToolResultText(m.toolName ?? 'tool', m.toolCallId ?? '', m.content, m.isError));
           break;
         }
@@ -217,7 +251,7 @@ export function toWireMessages(messages: ChatMessage[], opts: WireOptions): Wire
   }
 
   // Providers that dislike user-after-tool get a short assistant bridge.
-  if (quirks.noUserAfterTool && !text) {
+  if (quirks.noUserAfterTool && !textHistory) {
     for (let i = 1; i < out.length; i++) {
       if (out[i]!.role === 'user' && out[i - 1]!.role === 'tool') {
         out.splice(i, 0, { role: 'assistant', content: 'Noted.' });

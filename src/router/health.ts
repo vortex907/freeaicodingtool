@@ -22,6 +22,8 @@ export interface ModelHealth {
   needsMinimal?: boolean;
   /** Model rejects the system role. */
   noSystemRole?: boolean;
+  /** Until this time, send earlier tool use to this model as text (it rejected the native history). */
+  textHistoryUntil?: number;
   /** Model unusable until this time (not found / forbidden). */
   disabledUntil?: number;
   disabledReason?: string;
@@ -76,6 +78,17 @@ export interface WaitInfo {
   waitMs: number;
   keyIndex: number;
   reason?: string;
+}
+
+/** First sentence of a provider error, without JSON noise, for one-line status messages. */
+export function shortError(message: string): string {
+  let m = message.replace(/^[^:]{1,60}\/[^:]{1,80}: /, '');
+  const inner = /"message"\s*:\s*"([^"]{3,300})"/.exec(m);
+  if (inner) m = inner[1]!;
+  m = m.replace(/\s+/g, ' ').trim();
+  const cut = m.search(/[.!?](\s|$)/);
+  if (cut > 15 && cut < 140) m = m.slice(0, cut);
+  return m.length > 120 ? `${m.slice(0, 117)}...` : m || 'unknown error';
 }
 
 export class HealthStore {
@@ -355,6 +368,13 @@ export class HealthStore {
         break;
       }
       case 'quota': {
+        // "limit: 0" means this model has no free quota at all on this key (e.g. Gemini Pro): skip it for days.
+        if (/\blimit:?\s*0\b|quota(?:_value|Value)?"?:\s*"?0\b|free tier.*not (?:available|supported)|no free (?:tier|quota)/i.test(raw)) {
+          h.disabledUntil = Date.now() + 3 * 24 * 3600_000;
+          h.disabledReason = 'no free quota for this model';
+          desc = h.disabledReason;
+          break;
+        }
         let ms = err.retryAfterMs ?? nextUtcMidnight() - Date.now();
         if (/month/i.test(err.message) && !err.retryAfterMs) ms = 24 * 3600_000;
         if (/credit|balance|billing|payment/i.test(err.message) && !err.retryAfterMs) ms = 12 * 3600_000;
@@ -363,12 +383,19 @@ export class HealthStore {
         break;
       }
       case 'auth':
+        if (p.kind === 'keyless' || !p.apiKeys.some(Boolean)) {
+          // No-signup providers: only some of their models need a paid account.
+          h.disabledUntil = Date.now() + 24 * 3600_000;
+          h.disabledReason = 'needs a paid account';
+          desc = h.disabledReason;
+          break;
+        }
         this.setCooldown(providerKey, 6 * 3600_000, 'API key rejected', 'auth');
         desc = 'API key rejected';
         break;
       case 'not_found':
       case 'forbidden_model':
-        h.disabledUntil = Date.now() + 24 * 3600_000;
+        h.disabledUntil = Date.now() + 3 * 24 * 3600_000;
         h.disabledReason = err.kind === 'not_found' ? 'model not available' : 'model not allowed for this key';
         desc = h.disabledReason;
         break;
@@ -388,9 +415,12 @@ export class HealthStore {
       case 'timeout':
       case 'empty':
       case 'unknown': {
-        const ms = Math.min(10 * 60_000, 15_000 * 2 ** Math.max(0, h.consecutiveFailures - 1));
+        // A model that timed out will most likely time out again soon: bench it longer.
+        const base = err.kind === 'timeout' ? 5 * 60_000 : 15_000;
+        const ms = Math.min(err.kind === 'timeout' ? 60 * 60_000 : 10 * 60_000, base * 2 ** Math.max(0, h.consecutiveFailures - 1));
         this.setCooldown(modelKey, ms, err.kind === 'empty' ? 'returned an empty answer' : err.kind, err.kind);
-        desc = `${err.kind === 'empty' ? 'empty answer' : err.kind} (pausing ${humanMs(ms)})`;
+        const what = err.kind === 'empty' ? 'empty answer' : err.kind === 'unknown' || err.kind === 'server' ? `error: ${shortError(raw)}` : err.kind === 'timeout' ? 'too slow (timed out)' : err.kind;
+        desc = `${what} (pausing ${humanMs(ms)})`;
         if (err.kind === 'network' && /ENOTFOUND|ECONNREFUSED|EAI_AGAIN/.test(err.message)) {
           this.setCooldown(providerKey, 5 * 60_000, 'unreachable', 'network');
           desc = 'provider unreachable';
@@ -418,6 +448,16 @@ export class HealthStore {
   setNoSystemRole(m: ModelInfo): void {
     this.model(m.key).noSystemRole = true;
     this.scheduleSave();
+  }
+
+  /** Remember for a while that this model needs earlier tool use sent as text. */
+  setTextHistory(m: ModelInfo): void {
+    this.model(m.key).textHistoryUntil = Date.now() + 60 * 60_000;
+    this.scheduleSave();
+  }
+
+  needsTextHistory(m: ModelInfo): boolean {
+    return (this.peekModel(m.key)?.textHistoryUntil ?? 0) > Date.now();
   }
 
   resetModel(key: string): void {

@@ -194,6 +194,8 @@ export function classifyHttpError(status: number, body: string, headers?: Header
   const looksLimited = /rate.?limit|too many requests|RESOURCE_EXHAUSTED|quota/i.test(hay);
   if (status === 429 || (looksLimited && (status === 403 || status === 503))) {
     if (/request too large|reduce your message size/i.test(hay)) return { kind: 'too_large', message, retryAfterMs, limitTokens };
+    // "limit: 0": this model has no free quota at all (e.g. Gemini Pro on a free key); waiting won't help.
+    if (/\blimit:?\s*0\b/i.test(hay)) return { kind: 'quota', message, limitTokens };
     if (DAILY_RE.test(hay) || MONTHLY_RE.test(hay)) return { kind: 'quota', message, retryAfterMs, limitTokens };
     if (/PerMinute|per[ -]minute|\bRPM\b|\bTPM\b|per-min\b|temporarily rate-limited|retry shortly/i.test(hay)) {
       return { kind: 'rate_limit', message, retryAfterMs, limitTokens };

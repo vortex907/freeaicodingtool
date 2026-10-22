@@ -46,8 +46,14 @@ let shellCache: ShellInfo | null = null;
 export function detectShell(): ShellInfo {
   if (shellCache) return shellCache;
   if (isWindows) {
+    const custom = process.env.FREECODE_SHELL;
+    if (custom && existsSync(custom)) {
+      const base = path.basename(custom).toLowerCase();
+      if (/^(pwsh|powershell)(\.exe)?$/.test(base)) return (shellCache = { path: custom, kind: 'powershell', name: 'PowerShell' });
+      if (/^cmd(\.exe)?$/.test(base)) return (shellCache = { path: custom, kind: 'cmd', name: 'cmd.exe' });
+      return (shellCache = { path: custom, kind: 'bash', name: base.replace(/\.exe$/, '') });
+    }
     const gitBashCandidates = [
-      process.env.FREECODE_SHELL,
       'C:\\Program Files\\Git\\bin\\bash.exe',
       'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
       path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Git', 'bin', 'bash.exe'),

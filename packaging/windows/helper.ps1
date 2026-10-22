@@ -1,5 +1,5 @@
 # Helper for the FreeCode installer and uninstaller.
-#   helper.ps1 stop          stop FreeCode processes started from this installation
+#   helper.ps1 stop          close FreeCode (its window and engine) if it runs from this installation
 #   helper.ps1 add-path      add the installation folder to the user's PATH
 #   helper.ps1 remove-path   remove it again
 # The installation folder comes from $env:FREECODE_INSTDIR.
@@ -16,7 +16,17 @@ function Get-PathKind($key) {
 
 switch ($Action) {
   'stop' {
+    # The window first: its engine notices and saves before exiting.
+    $app = Join-Path $dir 'FreeCode.exe'
+    Get-CimInstance Win32_Process -Filter "Name = 'FreeCode.exe'" |
+      Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $app) } |
+      ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
     $node = Join-Path $dir 'runtime\node.exe'
+    for ($i = 0; $i -lt 20; $i++) {
+      $left = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $node) })
+      if ($left.Count -eq 0) { break }
+      Start-Sleep -Milliseconds 250
+    }
     Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" |
       Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $node) } |
       ForEach-Object { Stop-Process -Id $_.ProcessId -Force }

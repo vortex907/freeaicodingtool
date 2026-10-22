@@ -8,6 +8,8 @@ export interface ToolCall {
   name: string;
   /** Raw JSON string of arguments as produced by the model. */
   arguments: string;
+  /** Provider data to send back with this call, e.g. Gemini's `extra_content.google.thought_signature`. */
+  extra?: Record<string, unknown>;
 }
 
 export interface ImageAttachment {
@@ -72,6 +74,8 @@ export interface ProviderQuirks {
   toolMessageName?: boolean;
   /** Always send max tokens (provider default is tiny). */
   requireMaxTokens?: boolean;
+  /** Gemini 3: tool calls carry thought signatures (extra_content) that must be sent back. */
+  thoughtSignatures?: boolean;
 }
 
 export type ProviderKind = 'free' | 'keyless' | 'local' | 'trial' | 'paid';

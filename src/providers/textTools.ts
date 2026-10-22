@@ -298,7 +298,28 @@ export function parseToolCallsFromText(text: string, known?: Set<string>): Parse
     }
   }
 
-  // 7. The whole reply is a bare JSON call object
+  // 7. gpt-oss "harmony" tokens: <|channel|>commentary to=functions.NAME <|constrain|>json<|message|>{...}<|call|>
+  {
+    const re = /(?:<\|start\|>assistant)?<\|channel\|>[^<]*?\bto=(?:functions\.)?([\w.-]+)[^<]*?(?:<\|constrain\|>[^<]*)?<\|message\|>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      let j = m.index + m[0].length;
+      while (j < text.length && /\s/.test(text[j]!)) j++;
+      const end = text[j] === '{' ? findBalancedEnd(text, j) : -1;
+      const stop = end < 0 ? text.length : end;
+      let args: unknown = {};
+      try {
+        args = parseJsonLenient(text.slice(j, stop));
+      } catch {
+        // ignore
+      }
+      const closing = /^\s*(?:<\|call\|>|<\|end\|>)/.exec(text.slice(stop));
+      const tail = stop + (closing ? closing[0].length : 0);
+      if (!taken(m.index, tail)) matches.push({ start: m.index, end: tail, calls: [{ name: m[1]!, args }] });
+    }
+  }
+
+  // 8. The whole reply is a bare JSON call object
   if (!matches.length && known && known.size) {
     const t = text.trim();
     if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
@@ -320,8 +341,10 @@ export function parseToolCallsFromText(text: string, known?: Set<string>): Parse
     }
   }
   rest += text.slice(last);
-  // Remove leftover protocol tokens.
+  // Remove leftover protocol tokens (and gpt-oss "analysis" thinking, which is not meant to be shown).
   rest = rest
+    .replace(/<\|channel\|>\s*analysis\s*<\|message\|>[\s\S]*?(?:<\|end\|>|$)/g, '')
+    .replace(/<\|(?:start|end|message|channel|call|return|constrain)\|>(?:assistant|final)?/g, '')
     .replace(/<\|tool_calls_section_begin\|>|<\|tool_calls_section_end\|>|<｜tool▁calls▁begin｜>|<｜tool▁calls▁end｜>|<\/?tool_calls?>/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -330,5 +353,5 @@ export function parseToolCallsFromText(text: string, known?: Set<string>): Parse
 
 /** True if the text might contain a tool call (cheap pre-check). */
 export function mightContainToolCall(text: string): boolean {
-  return /<tool_call>|<function=|\[TOOL_CALLS\]|<\|python_tag\|>|<\|tool_call_begin\|>|tool▁call|"name"\s*:|"tool"\s*:/.test(text);
+  return /<tool_call>|<function=|\[TOOL_CALLS\]|<\|python_tag\|>|<\|tool_call_begin\|>|tool▁call|<\|channel\|>|"name"\s*:|"tool"\s*:/.test(text);
 }

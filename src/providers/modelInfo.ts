@@ -155,7 +155,7 @@ const FAMILY_RULES: FamilyRule[] = [
   { re: /starcoder|codegemma|codellama/i, quality: 25, context: 16384, textTools: true },
 ];
 
-const NON_CHAT = /embed|embedding|rerank|retriev|whisper|tts|speech|audio|transcri|voxtral|moderation|guard|safety|reward|classif|ocr|parse|clip|imagen|image-gen|imagegen|dall-?e|flux|sdxl|stable-diffusion|veo|sora|text-to-image|vision-only|aqa|bge-|e5-|arctic-embed|nemoretriever|riva|translate|grounding|yolo|detector|segment|depth|cosmos|kosmos|deplot|paligemma|fuyu|neva|vila|nv-embed|-tts|playai|orpheus|lyria|realtime|computer-use|nano-banana|robotics|live-/i;
+const NON_CHAT = /embed|embedding|rerank|retriev|whisper|tts|speech|audio|transcri|voxtral|moderation|guard|safety|reward|classif|ocr|parse|clip|imagen|image-gen|imagegen|dall-?e|flux|sdxl|stable-diffusion|veo|sora|text-to-image|vision-only|aqa|bge-|e5-|arctic-embed|nemoretriever|riva|translate|grounding|yolo|detector|segment|depth|cosmos|kosmos|deplot|paligemma|fuyu|neva|vila|nv-embed|-tts|playai|orpheus|lyria|realtime|computer-use|nano-banana|robotics|live-|(?:^|[-_/.])image(?:[-_.]|$)/i;
 
 export function isChatModelId(id: string): boolean {
   return !NON_CHAT.test(id);

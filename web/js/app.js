@@ -46,7 +46,32 @@ function setTheme(t) {
     localStorage.setItem('fc-theme', t);
   } catch {}
   renderSidebar();
+  syncHostTheme();
 }
+
+// ---------------------------------------------------------------- native window (FreeCode.exe on Windows)
+
+/** Colors the native window's title bar like the app. */
+function syncHostTheme() {
+  if (typeof window.fcHostTheme !== 'function') return;
+  const color = getComputedStyle(document.documentElement).getPropertyValue('--bg-sidebar').trim();
+  Promise.resolve(window.fcHostTheme(document.documentElement.dataset.theme || 'dark', color)).catch(() => {});
+}
+
+/** Called by the native window for "Open with FreeCode" on a folder while the app is open. */
+window.fcOpenProject = async (path, trust) => {
+  try {
+    const r = await api.post('/api/project', { path, ...(trust !== undefined ? { trust } : {}) });
+    if (r.needsTrust) {
+      const ok = confirm(`This folder contains project settings (hooks, MCP servers or permission rules) that can run commands:\n\n${r.root}\n\nDo you trust this folder?`);
+      return window.fcOpenProject(path, ok);
+    }
+    if (!r.ok) throw new Error(r.error || 'Could not open folder');
+    await loadState();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+};
 
 const ctx = {
   state: () => S.state,
@@ -120,6 +145,16 @@ function findItem(id) {
   return S.items.find((i) => i.id === id);
 }
 
+/** The current model produced output: later switches start a new route line. */
+function settleRoute() {
+  const r = S.live.route;
+  if (r && (r.open || r.retrying)) {
+    touch(r);
+    r.open = false;
+    r.retrying = null;
+  }
+}
+
 function currentAssistant() {
   if (!S.live.assistant) {
     const item = { kind: 'assistant', id: nid('a'), text: '', reasoning: '', streaming: true };
@@ -136,24 +171,35 @@ function handleAgentEvent(e, replay) {
       live.turnStart = Date.now();
       live.outChars = 0;
       live.turnModel = null;
+      live.route = null;
       break;
     case 'model': {
       live.wait = null;
-      if (e.key !== live.lastModel) {
+      if (live.route && live.route.open) {
+        // Still looking for a model that works: update the same line instead of adding another.
+        touch(live.route);
+        live.route.model = e.key;
+        live.route.textTools = e.toolMode === 'text';
+        live.route.retrying = null;
+        live.lastModel = e.key;
+        live.assistant = null;
+      } else if (e.key !== live.lastModel) {
         const switched = !!live.turnModel && live.turnModel !== e.key;
         const prof = !switched && e.reason === 'selected' && !S.state?.model?.pinned ? live.profile : null;
         const why = S.state?.model?.pinned && !switched ? 'Pinned' : switched || e.attempt > 1 ? 'Switched' : prof ? `${prof.complexity} ${prof.type}` : 'Auto';
-        S.items.push({ kind: 'route', id: nid('r'), why, model: e.key, textTools: e.toolMode === 'text' });
+        live.route = { kind: 'route', id: nid('r'), why, model: e.key, textTools: e.toolMode === 'text', tries: [], open: false };
+        S.items.push(live.route);
         live.lastModel = e.key;
-        live.turnModel = live.turnModel || e.key;
         live.assistant = null;
       }
+      live.turnModel = live.turnModel || e.key;
       break;
     }
     case 'profile':
       live.profile = e.profile;
       break;
     case 'text': {
+      settleRoute();
       const a = currentAssistant();
       touch(a);
       if (a.reasoning && a.thinkingSince && !a.thoughtMs) a.thoughtMs = Date.now() - a.thinkingSince;
@@ -162,6 +208,7 @@ function handleAgentEvent(e, replay) {
       break;
     }
     case 'reasoning': {
+      settleRoute();
       const a = currentAssistant();
       touch(a);
       if (!a.reasoning) live.reasoningStart = Date.now();
@@ -184,6 +231,7 @@ function handleAgentEvent(e, replay) {
       live.streamingTool = null;
       break;
     case 'tool_start':
+      settleRoute();
       live.assistant = null;
       S.items.push({ kind: 'tool', id: e.id, name: e.name, label: e.label, input: e.input, status: 'running', started: Date.now() });
       break;
@@ -216,8 +264,18 @@ function handleAgentEvent(e, replay) {
         live.assistant.streaming = false;
         live.assistant = null;
       }
-      S.items.push({ kind: 'notice', id: nid('n'), level: 'warn', text: `${e.from}: ${e.description}${e.retrySame ? '' : ' → switching model'}` });
-      if (!e.retrySame) live.lastModel = null;
+      if (!live.route) {
+        live.route = { kind: 'route', id: nid('r'), why: 'Auto', model: e.from, tries: [], open: true };
+        S.items.push(live.route);
+      }
+      touch(live.route);
+      if (e.retrySame) live.route.retrying = e.description;
+      else {
+        live.route.tries.push({ model: e.from, reason: e.description });
+        live.route.open = true;
+        live.route.retrying = null;
+        live.lastModel = null;
+      }
       break;
     }
     case 'wait':
@@ -470,6 +528,36 @@ function renderToolItem(item) {
   return el;
 }
 
+function renderRoute(item) {
+  const tries = item.tries || [];
+  const searching = item.open && !!S.state?.busy;
+  const chip = h(
+    'span',
+    { class: 'chip', title: 'The router picked this model for the task and switches automatically when a model is rate limited or failing.' },
+    h('span', { class: 'spark' }, '◆'),
+    h('span', null, tries.length && item.why === 'Auto' ? 'Switched' : item.why),
+    h('span', { class: 'faint' }, '→'),
+    h('b', null, item.model),
+    item.textTools ? h('span', { class: 'faint' }, '(text tools)') : null,
+  );
+  const row = h('div', { class: 'route-row' }, chip);
+  if (item.retrying) row.append(h('span', { class: 'route-status' }, item.retrying));
+  else if (item.open && searching) row.append(h('span', { class: 'route-status' }, 'trying the next model…'));
+  const wrap = h('div', { class: 'route', 'data-id': item.id }, row);
+  if (tries.length) {
+    const open = S.ui.open.has(item.id);
+    const toggle = h('button', { class: 'route-tries', type: 'button' }, `${item.open ? 'tried' : 'after'} ${tries.length} other model${tries.length === 1 ? '' : 's'}`, icon(open ? 'chevronDown' : 'chevronRight', 'svg-sm'));
+    toggle.addEventListener('click', () => {
+      if (S.ui.open.has(item.id)) S.ui.open.delete(item.id);
+      else S.ui.open.add(item.id);
+      replaceItem(item);
+    });
+    row.append(toggle);
+    if (open) wrap.append(h('ul', { class: 'route-list' }, tries.map((t) => h('li', null, h('b', null, t.model), h('span', null, t.reason)))));
+  }
+  return wrap;
+}
+
 function highlightMentions(text) {
   const frag = document.createDocumentFragment();
   let last = 0;
@@ -504,7 +592,7 @@ function renderItemEl(item) {
     case 'tool':
       return renderToolItem(item);
     case 'route':
-      return h('div', { class: 'route', 'data-id': item.id }, h('span', { class: 'chip', title: 'The router chose this model for the task. It switches automatically if the model is rate limited.' }, h('span', { class: 'spark' }, '◆'), h('span', null, item.why), h('span', { class: 'faint' }, '→'), h('b', null, item.model), item.textTools ? h('span', { class: 'faint' }, '(text tools)') : null));
+      return renderRoute(item);
     case 'notice':
       return h('div', { class: `note ${item.level}`, 'data-id': item.id }, icon(item.level === 'info' ? 'info' : 'alert', 'svg-sm'), h('span', null, item.text));
     case 'shell':
@@ -1363,6 +1451,7 @@ async function boot() {
   }
   $('boot').classList.add('gone');
   setTimeout(() => $('boot').remove(), 400);
+  syncHostTheme();
   connectEvents(handleMessage, (status) => {
     if (status === 'reconnected') loadState();
   });

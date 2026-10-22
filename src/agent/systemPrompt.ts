@@ -77,6 +77,8 @@ export async function environmentSection(projectRoot: string, cwd: string): Prom
     projectRoot !== cwd ? `Project root: ${projectRoot}` : '',
     `Platform: ${osDescription()}`,
     `Shell: ${shell.name}`,
+    shell.kind === 'powershell' ? 'Shell syntax: PowerShell. Chain commands with ";" (Windows PowerShell 5.1 has no "&&"), set variables with $env:NAME = "value", and do not add 2>&1 (output and errors are both captured).' : '',
+    shell.kind === 'cmd' ? 'Shell syntax: cmd.exe. Chain commands with "&&", set variables with set NAME=value.' : '',
     `Date: ${new Date().toISOString().slice(0, 10)}`,
     g ? `Git: repository on branch "${g.branch}"${g.mainBranch ? ` (main branch: ${g.mainBranch})` : ''}, ${g.status.length ? `${g.status.length} uncommitted change(s)` : 'clean working tree'}` : 'Git: not a git repository',
   ].filter(Boolean);

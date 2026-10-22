@@ -21,6 +21,8 @@ export interface ChatRequest {
   minimal?: boolean;
   strict?: boolean;
   noSystemRole?: boolean;
+  /** Send earlier tool calls/results as text (for providers that reject the tool history). */
+  historyAsText?: boolean;
   /** Abort if no response headers arrive within this time. */
   headersTimeoutMs?: number;
   /** Abort if the stream is silent for this long. */
@@ -87,8 +89,17 @@ export class ThinkTagFilter {
 }
 
 /** Accumulates streamed tool-call deltas, tolerating the many provider variations. */
+function mergeExtra(a: Record<string, unknown> | undefined, b: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(a ?? {}) };
+  for (const [k, v] of Object.entries(b)) {
+    const prev = out[k];
+    out[k] = prev && v && typeof prev === 'object' && typeof v === 'object' && !Array.isArray(v) ? { ...(prev as object), ...(v as object) } : v;
+  }
+  return out;
+}
+
 export class ToolCallAccumulator {
-  calls: { id?: string; name: string; args: string }[] = [];
+  calls: { id?: string; name: string; args: string; extra?: Record<string, unknown> }[] = [];
   private byIndex = new Map<number, number>();
 
   add(deltas: unknown[], onStart?: (name: string) => void): void {
@@ -121,6 +132,8 @@ export class ToolCallAccumulator {
       }
       const c = this.calls[idx]!;
       if (d.id && !c.id) c.id = d.id;
+      const extra = (raw as { extra_content?: unknown }).extra_content;
+      if (extra && typeof extra === 'object' && !Array.isArray(extra)) c.extra = mergeExtra(c.extra, extra as Record<string, unknown>);
       if (typeof fn.name === 'string' && fn.name) {
         const hadName = !!c.name;
         if (!c.name) c.name = fn.name;
@@ -145,7 +158,7 @@ export class ToolCallAccumulator {
   result(): ToolCall[] {
     return this.calls
       .filter((c) => c.name)
-      .map((c) => ({ id: c.id || newToolCallId(), name: c.name.trim(), arguments: c.args.trim() || '{}' }));
+      .map((c) => ({ id: c.id || newToolCallId(), name: c.name.trim(), arguments: c.args.trim() || '{}', ...(c.extra ? { extra: c.extra } : {}) }));
   }
 }
 
@@ -269,6 +282,7 @@ export async function chatCompletion(req: ChatRequest, handlers: StreamHandlers 
     minimal: req.minimal,
     strict: req.strict,
     noSystemRole: req.noSystemRole,
+    historyAsText: req.historyAsText,
     maxTokens: req.maxTokens,
     temperature: req.temperature,
     stream: req.stream ?? true,
@@ -292,7 +306,7 @@ export async function chatCompletion(req: ChatRequest, handlers: StreamHandlers 
       limitTokens: c.limitTokens,
       providerId: req.provider.id,
       modelId: req.model.id,
-      body: text.slice(0, 4000),
+      body: text.slice(0, 20000),
     });
   }
 
@@ -436,6 +450,7 @@ async function ollamaChat(req: ChatRequest, handlers: StreamHandlers): Promise<C
     model: req.model,
     toolMode: req.toolMode,
     tools: req.tools,
+    historyAsText: req.historyAsText,
   });
   const messages = wire.map((m) => {
     const out: Record<string, unknown> = { role: m.role };

@@ -5,6 +5,8 @@ import type { AddressInfo } from 'node:net';
 export interface MockCall {
   name: string;
   args: Record<string, unknown> | string;
+  /** Sent as the tool call's `extra_content` (Gemini thought signatures). */
+  extra?: Record<string, unknown>;
 }
 
 export type MockResponse =
@@ -131,6 +133,7 @@ export class MockServer {
       r.calls.forEach((c, i) => {
         const args = typeof c.args === 'string' ? c.args : JSON.stringify(c.args);
         const head: Record<string, unknown> = { id: `call_${idx}_${i}`, type: 'function', function: { name: c.name, arguments: '' } };
+        if (c.extra) head.extra_content = c.extra;
         if (!r.omitIndex) head.index = i;
         chunk({ tool_calls: [head] });
         const parts = args.match(/[\s\S]{1,10}/g) ?? [''];

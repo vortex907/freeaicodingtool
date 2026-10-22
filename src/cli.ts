@@ -54,6 +54,8 @@ interface CliArgs {
   desktop: boolean;
   /** Re-launch in the background without a console window, then exit. */
   detach: boolean;
+  /** Run inside the native Windows app window: print the address, quit when stdin closes. */
+  host: boolean;
   /** Whether --cwd was given explicitly. */
   cwdSet: boolean;
   remove: boolean;
@@ -92,6 +94,7 @@ export function parseArgs(argv: string[]): CliArgs {
     noOpen: false,
     desktop: false,
     detach: false,
+    host: false,
     cwdSet: false,
     remove: false,
     commandArgs: [],
@@ -222,6 +225,11 @@ export function parseArgs(argv: string[]): CliArgs {
         break;
       case '--detach':
         a.detach = true;
+        break;
+      case '--host':
+        a.host = true;
+        a.desktop = true;
+        a.noOpen = true;
         break;
       case '--remove':
         a.remove = true;
@@ -373,9 +381,9 @@ async function runPrint(a: CliArgs): Promise<number> {
   // Make sure we know the current free models before the first request.
   const cache = loadDiscoveryCache();
   const needsDiscovery = app.providers.some((p) => p.configured && p.def.discovery && p.def.discovery.type !== 'none' && !cache.providers[p.id]);
-  if (needsDiscovery) await Promise.race([app.startDiscovery(), new Promise((r) => setTimeout(r, 8000))]);
+  if (needsDiscovery) await Promise.race([app.startDiscovery(), new Promise((r) => setTimeout(r, 8000).unref())]);
   else void app.startDiscovery();
-  await Promise.race([app.startMcp(), new Promise((r) => setTimeout(r, 15000))]);
+  await Promise.race([app.startMcp(), new Promise((r) => setTimeout(r, 15000).unref())]);
   if (a.continueLast || typeof a.resume === 'string') {
     const { latestSession, loadSession } = await import('./session/session.js');
     const s = a.continueLast ? await latestSession(app.projectRoot) : await loadSession(app.projectRoot, a.resume as string);
@@ -639,7 +647,7 @@ async function runGui(a: CliArgs): Promise<number> {
       a.cwdSet = true;
       a.prompt = [];
     }
-    if (!a.noOpen) {
+    if (!a.noOpen && !a.host) {
       const reuse = (await liveInstances()).find((i) => !a.cwdSet || samePath(i.projectRoot, cwd));
       if (reuse) {
         process.stdout.write(`FreeCode is already running (pid ${reuse.pid}); opening a window on it.\n`);
@@ -664,6 +672,14 @@ async function runGui(a: CliArgs): Promise<number> {
   const unregister = registerInstance({ pid: process.pid, port: srv.port, token: srv.token, version: VERSION, startedAt: Date.now() });
   let resolveExit: () => void = () => undefined;
   const done = new Promise<void>((r) => (resolveExit = r));
+  if (a.host) {
+    // The native window (FreeCode.exe) reads this line, and closes our stdin when it closes.
+    process.stdout.write(`FREECODE_READY ${srv.url}\n`);
+    process.stdin.on('end', () => resolveExit());
+    process.stdin.on('close', () => resolveExit());
+    process.stdin.on('error', () => resolveExit());
+    process.stdin.resume();
+  }
   const launched = a.noOpen ? { mode: 'none' as const } : launchApp(srv.url);
   if (launched.mode === 'app-window') {
     process.stdout.write(`${theme.success('✓')} App window opened. ${c.dim('Closing the window quits FreeCode. Press Ctrl+C here to quit too.')}\n`);

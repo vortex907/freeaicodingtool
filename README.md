@@ -147,7 +147,7 @@ Hooks, MCP servers, environment variables and allow rules in a project's setting
 
 ## Troubleshooting
 
-- **Nothing happens when I start it (Windows):** see `%USERPROFILE%\.freecode\logs\desktop.log`. The launcher also shows this log if FreeCode stops while starting.
+- **FreeCode stopped or will not start (Windows):** the window shows the end of the log and a **Restart** button. The full log is `%USERPROFILE%\.freecode\logs\desktop.log`.
 - **Check your keys:** run `freecode doctor` to test every configured key and show what's in your pool.
 - **Behind a proxy:** set `HTTPS_PROXY` and start with `NODE_USE_ENV_PROXY=1`.
 - **Ollama models forget things:** FreeCode asks Ollama for a larger context window (`num_ctx`). Pick models with at least 32K context for coding.
@@ -155,11 +155,11 @@ Hooks, MCP servers, environment variables and allow rules in a project's setting
 ## Building the Windows installer
 
 ```sh
-sudo apt-get install nsis gcc-mingw-w64-x86-64 unzip zip    # Debian/Ubuntu
+sudo apt-get install nsis g++-mingw-w64-x86-64 unzip zip    # Debian/Ubuntu
 npm run package:win
 ```
 
-This writes `release/FreeCode-Setup-<version>.exe` and `release/FreeCode-<version>-win-x64.zip`. The script downloads the official Node.js LTS for Windows and checks its SHA-256. It then compiles the small windowless launcher (`packaging/windows/launcher.c`) and packs everything with NSIS (`packaging/windows/installer.nsi`).
+This writes `release/FreeCode-Setup-<version>.exe` and `release/FreeCode-<version>-win-x64.zip`. The script downloads the official Node.js LTS for Windows and the WebView2 SDK headers, checking their SHA-256. It then compiles the app window (`packaging/windows/app.cc`) and packs everything with NSIS (`packaging/windows/installer.nsi`). The app window is a small native program that runs FreeCode in WebView2, the web engine built into Windows 10 and 11, so FreeCode gets its own window and title bar.
 
 ## Development
 

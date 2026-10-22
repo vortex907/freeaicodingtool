@@ -5,6 +5,7 @@ import type { ChatMessage, ChatResult, ModelInfo, ProviderRuntime, ToolMode, Too
 import type { Settings } from '../config/config.js';
 import { ProviderError } from '../providers/errors.js';
 import { chatCompletion, type StreamHandlers } from '../providers/client.js';
+import { parseToolCallsFromText } from '../providers/textTools.js';
 import { HealthStore, humanMs } from './health.js';
 import { type TaskProfile, CLASSIFIER_SYSTEM_PROMPT, buildClassifierInput, classifyHeuristic, parseClassifierReply } from './classifier.js';
 import { estimateRequestTokens } from '../util/tokens.js';
@@ -72,6 +73,37 @@ const COMPLEXITY_WEIGHTS: Record<string, { q: number; s: number }> = {
   moderate: { q: 0.85, s: 0.15 },
   complex: { q: 1.0, s: 0.04 },
 };
+
+/** Tool calls recovered from a provider's "failed_generation" (Groq's tool_use_failed errors). */
+function salvageFailedGeneration(body: string | undefined, tools: ToolSchema[]): ChatResult | null {
+  if (!body || !body.includes('failed_generation')) return null;
+  let gen: unknown;
+  try {
+    gen = (JSON.parse(body) as { error?: { failed_generation?: unknown } }).error?.failed_generation;
+  } catch {
+    const m = /"failed_generation"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(body);
+    if (m) {
+      try {
+        gen = JSON.parse(`"${m[1]}"`);
+      } catch {
+        gen = undefined;
+      }
+    }
+  }
+  if (typeof gen !== 'string' || !gen.trim()) return null;
+  const parsed = parseToolCallsFromText(gen, new Set(tools.map((t) => t.name)));
+  if (!parsed.toolCalls.length) return null;
+  return { content: parsed.text, reasoning: '', toolCalls: parsed.toolCalls, finishReason: 'tool_calls', latencyMs: 0 };
+}
+
+/** Turns a non-provider exception (socket closed mid-stream, ...) into the closest ProviderError. */
+function asProviderError(e: unknown): ProviderError {
+  const msg = (e as Error)?.message ?? String(e);
+  const code = (e as { cause?: { code?: string } })?.cause?.code ?? (e as { code?: string })?.code ?? '';
+  if (/timeout|timed out/i.test(msg) || /TIMEOUT/.test(code)) return new ProviderError('timeout', msg);
+  if (/terminated|other side closed|socket hang up|ECONNRESET|EPIPE|fetch failed|network|UND_ERR/i.test(`${msg} ${code}`)) return new ProviderError('network', `connection dropped (${msg})`);
+  return new ProviderError('unknown', msg);
+}
 
 export class Router {
   /** Profile cache so identical requests are not classified twice. */
@@ -215,6 +247,8 @@ export class Router {
     const sameRetries = new Map<string, number>();
     const minimalTried = new Set<string>();
     const noSysTried = new Set<string>();
+    const textHistoryTried = new Set<string>();
+    const hasToolHistory = req.messages.some((m) => m.role === 'tool' || !!m.toolCalls?.length);
     let attempts = 0;
     let waitedMs = 0;
     const maxTotalWait = req.maxTotalWaitMs ?? 5 * 60_000;
@@ -261,6 +295,7 @@ export class Router {
       const toolMode: ToolMode = req.tools?.length ? this.health.effectiveToolMode(c.model) : 'native';
       const minimal = !!h?.needsMinimal || minimalTried.has(c.model.key);
       const noSystemRole = !!h?.noSystemRole || noSysTried.has(c.model.key);
+      const historyAsText = hasToolHistory && (textHistoryTried.has(c.model.key) || this.health.needsTextHistory(c.model));
       events.onAttempt?.(c, { attempt: attempts, reason: attempts === 1 ? 'selected' : 'failover', toolMode });
       const apiKey = c.provider.apiKeys[c.keyIndex] ?? c.provider.apiKeys[0] ?? '';
       this.health.recordRequestStart(c.provider, c.model, c.keyIndex, estTokens);
@@ -280,6 +315,7 @@ export class Router {
             minimal,
             strict: minimal,
             noSystemRole,
+            historyAsText,
             stream: req.stream,
             headersTimeoutMs: req.purpose === 'classify' ? 8000 : undefined,
             idleTimeoutMs: req.purpose === 'classify' ? 15000 : undefined,
@@ -312,16 +348,28 @@ export class Router {
         });
         if (minimal && !h?.needsMinimal) this.health.setNeedsMinimal(c.model);
         if (noSystemRole && !h?.noSystemRole) this.health.setNoSystemRole(c.model);
+        if (textHistoryTried.has(c.model.key)) this.health.setTextHistory(c.model);
         return { ...result, candidate: c, toolMode, attempts };
       } catch (e) {
         if (req.signal?.aborted) throw new ProviderError('aborted', 'Aborted');
-        const err = e instanceof ProviderError ? e : new ProviderError('unknown', (e as Error).message ?? String(e));
+        const err = e instanceof ProviderError ? e : asProviderError(e);
         if (err.kind === 'aborted') throw err;
         debug('router', `${c.model.key} failed: ${err.kind} ${err.message}`);
+        // Groq rejects tool calls it can't parse ("tool_use_failed") but returns the model's attempt:
+        // our own parser usually recovers the call.
+        const salvaged = err.kind === 'bad_request' && req.tools?.length ? salvageFailedGeneration(err.body, req.tools) : null;
+        if (salvaged) return { ...salvaged, candidate: c, toolMode, attempts };
         let retrySame = false;
+        let retryNote = '';
+        // A rejected tool history (e.g. Gemini 3 thought signatures): resend it as plain text.
+        const historyProblem = err.kind === 'bad_request' && /thought.?signature|function.?call|tool.?call|tool_use|tool result|function response/i.test(err.message);
         // Recoverable on the same model with a different request shape.
         if (err.kind === 'tools_unsupported' && toolMode === 'native' && req.tools?.length) {
           retrySame = true;
+        } else if (err.kind === 'bad_request' && hasToolHistory && !historyAsText && !textHistoryTried.has(c.model.key) && (historyProblem || minimalTried.has(c.model.key) || !!h?.needsMinimal)) {
+          textHistoryTried.add(c.model.key);
+          retrySame = true;
+          retryNote = 'rejected the tool history, resending it as text';
         } else if (err.kind === 'bad_request' && !minimalTried.has(c.model.key) && !h?.needsMinimal) {
           minimalTried.add(c.model.key);
           retrySame = true;
@@ -335,7 +383,7 @@ export class Router {
         }
         let description: string;
         if (retrySame && err.kind !== 'tools_unsupported') {
-          description = err.kind === 'bad_request' ? 'request rejected, retrying in compatibility mode' : `${err.kind}, retrying`;
+          description = retryNote || (err.kind === 'bad_request' ? 'request rejected, retrying in compatibility mode' : err.kind === 'timeout' ? 'slow to answer, retrying' : `${err.kind}, retrying`);
         } else {
           description = this.health.recordFailure(c.provider, c.model, c.keyIndex, err, estTokens);
         }
