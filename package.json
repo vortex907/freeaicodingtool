@@ -1,6 +1,6 @@
 {
   "name": "freecode",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "A free AI coding agent (desktop app + terminal). Pools every free LLM API (Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cerebras, Cohere, Z.ai, Cloudflare, Ollama, ...) behind an AI router with automatic failover.",
   "type": "module",
   "bin": {
