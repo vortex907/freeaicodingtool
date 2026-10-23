@@ -21,6 +21,7 @@ import { type SavedSession, newSessionId, saveSession, sessionTitle } from './se
 import { gitRoot } from './util/git.js';
 import { runHooks } from './agent/hooks.js';
 import { applyIndexSettings, getIndex, indexPromptSection, isCodeIndexEnabled } from './codeindex/index.js';
+import { applyLspSettings, stopLanguageServers } from './lsp/index.js';
 import { debug } from './util/log.js';
 import { refreshToolchain } from './util/toolchain.js';
 
@@ -126,6 +127,7 @@ export class App {
   reloadConfig(): void {
     this.loaded = loadConfig(this.projectRoot ?? this.cwd, this.opts.overrides, { trusted: this.opts.trusted });
     applyIndexSettings(this.loaded.global.index);
+    applyLspSettings(this.loaded.global.lsp);
     if (this.agent) {
       const p = this.agent.opts.permissions;
       p.allow = [...this.settings.permissions.allow, ...(this.opts.allowedTools ?? [])];
@@ -255,5 +257,6 @@ export class App {
     this.health.saveNow();
     // Stops indexing and saves progress; the next ensureProject resumes it.
     void getIndex().suspend();
+    void stopLanguageServers();
   }
 }

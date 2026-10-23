@@ -7,9 +7,13 @@ import { gitInfo } from '../util/git.js';
 import { toolchainSummary } from '../util/toolchain.js';
 import type { MemoryFile } from './memory.js';
 import { DEFAULT_IGNORED_DIRS } from '../tools/listFiles.js';
+import { isLspEnabled } from '../lsp/index.js';
 
 /** The CodeSearch line of the tool rules (left out when the code index is turned off). */
 export const CODE_SEARCH_RULE = '- For questions like "where is X handled" or "how does A use B", use CodeSearch first, then Read the hits.';
+
+/** The LSP line of the tool rules (left out when language servers are turned off). */
+export const LSP_RULE = '- Edit and Write results include the errors the language server finds: fix the ones your edit caused at once. Use LSP for definitions, references, types (hover), renames across files and diagnostics.';
 
 export const CORE_PROMPT = `You are FreeCode, an AI coding agent working on the user's own computer (in the FreeCode app or a terminal). You build, fix, refactor and explain software, run builds and tests, and use git. You act through your tools; the user sees your tool calls and their results.
 
@@ -53,6 +57,7 @@ Your training data is out of date. For anything that can change over time (lates
 - Prefer Edit over Write for existing files. Never edit files with Bash (no sed -i, echo >, cat <<EOF).
 - Use Glob/Grep/LS instead of find/grep/ls, and Read instead of cat/head/tail.
 ${CODE_SEARCH_RULE}
+${LSP_RULE}
 - Make independent tool calls together in one reply (for example reading several files).
 - Bash commands must not be interactive. Start servers, watchers and GUI apps with run_in_background=true. Quote paths that contain spaces.
 - Use REPL (Python or Node) for quick experiments, inspecting data and keeping state between steps; use Bash for scripts, tests and builds.
@@ -101,6 +106,8 @@ export interface PromptContext {
   indexSection?: string;
   /** False when the code index is turned off (no CodeSearch tool). */
   codeSearch?: boolean;
+  /** False when language servers are turned off (no LSP tool); defaults to the current setting. */
+  lsp?: boolean;
   extraSections?: string[];
   /** Name/key of the model that will receive the prompt (optional). */
   modelName?: string;
@@ -129,7 +136,8 @@ export async function environmentSection(projectRoot: string, cwd: string): Prom
 }
 
 export function buildSystemPrompt(ctx: PromptContext, envSection: string): string {
-  const core = ctx.codeSearch === false ? CORE_PROMPT.replace(`${CODE_SEARCH_RULE}\n`, '') : CORE_PROMPT;
+  let core = ctx.codeSearch === false ? CORE_PROMPT.replace(`${CODE_SEARCH_RULE}\n`, '') : CORE_PROMPT;
+  if (!(ctx.lsp ?? isLspEnabled())) core = core.replace(`${LSP_RULE}\n`, '');
   const parts: string[] = [ctx.depth > 0 ? `${SUBAGENT_PROMPT}\n\n${core.split('# Communication')[0]!.trim()}` : core];
   if (ctx.mode === 'plan' && ctx.depth === 0) parts.push(PLAN_MODE_PROMPT);
   parts.push(envSection);

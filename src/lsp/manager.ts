@@ -55,6 +55,8 @@ export interface ProjectDiagnostics {
   /** Languages that could not be checked, and why. */
   notes: string[];
   checked: number;
+  /** Some languages had more files than were opened. */
+  limited: boolean;
   servers: string[];
 }
 
@@ -309,7 +311,7 @@ export class LspManager {
    */
   async projectDiagnostics(projectRoot: string, opts: { signal?: AbortSignal; timeoutMs?: number; prefer?: string[] } = {}): Promise<ProjectDiagnostics> {
     const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
-    const result: ProjectDiagnostics = { files: [], notes: [], checked: 0, servers: [] };
+    const result: ProjectDiagnostics = { files: [], notes: [], checked: 0, limited: false, servers: [] };
     if (!this.enabled) {
       result.notes.push('Language servers are turned off in the settings (lsp.enabled).');
       return result;
@@ -330,7 +332,9 @@ export class LspManager {
       [...byDef].map(async ([def, list]) => {
         const recent = (await sortByMtime(projectRoot, list)).map((r) => path.join(projectRoot, r));
         const preferred = (opts.prefer ?? []).filter((f) => defForFile(f, this.defs) === def && isInside(f, projectRoot));
-        const pick = [...new Map([...preferred, ...recent].map((f) => [pathKey(f), f])).values()].slice(0, PROJECT_FILES_PER_LANGUAGE);
+        const all = [...new Map([...preferred, ...recent].map((f) => [pathKey(f), f])).values()];
+        if (all.length > PROJECT_FILES_PER_LANGUAGE) result.limited = true;
+        const pick = all.slice(0, PROJECT_FILES_PER_LANGUAGE);
         const byRoot = new Map<string, string[]>();
         for (const f of pick) {
           const root = findRoot(def, f, projectRoot);

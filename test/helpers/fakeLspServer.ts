@@ -247,6 +247,9 @@ function handle(msg: Msg): void {
       for (const [name, defs] of definitions()) if (name.toLowerCase().includes(q)) for (const d of defs) out.push({ name, kind: 12, location: { uri: d.uri, range: d.range } });
       return reply(msg.id, out);
     }
+    case 'fake/hang':
+      // Never answered: for the client's request timeout.
+      return;
     case 'shutdown':
       return reply(msg.id, null);
     case 'exit':

@@ -28,6 +28,7 @@ import { VERSION } from '../version.js';
 import { COMMIT_PROMPT, WORKFLOWS, findWorkflow } from '../agent/workflows.js';
 import type { ImageAttachment } from '../providers/types.js';
 import { getIndex } from '../codeindex/index.js';
+import { isLspEnabled } from '../lsp/index.js';
 
 export type UIItem =
   | { kind: 'user'; id: string; text: string; ts?: number; queued?: boolean }
@@ -250,6 +251,7 @@ export class Controller {
         saveSessions: s.saveSessions,
         autoUpdate: s.autoUpdate !== false,
         plainPunctuation: s.plainPunctuation !== false,
+        lsp: { enabled: isLspEnabled() },
       },
       mcp: [...app.mcp.entries].map((e) => {
         const cl = app.mcp.clients.get(e.name);
@@ -653,7 +655,7 @@ export class Controller {
   // ------------------------------------------------------------------ settings
 
   updateSettings(patch: Record<string, unknown>): void {
-    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate', 'plainPunctuation', 'index.enabled', 'index.roots'];
+    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate', 'plainPunctuation', 'index.enabled', 'index.roots', 'lsp.enabled'];
     updateGlobalConfig((g) => {
       for (const [k, v] of Object.entries(patch)) if (allowed.includes(k)) setByPath(g as Record<string, unknown>, k, v);
     });

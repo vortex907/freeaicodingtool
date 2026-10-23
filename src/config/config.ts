@@ -140,6 +140,8 @@ export interface Settings {
   skills?: { marketplaces?: string[] };
   /** Code index (CodeSearch): on by default; roots are extra folders of projects to index next to the current one. Global only. */
   index?: { enabled?: boolean; roots?: string[] };
+  /** Language servers (diagnostics after edits, the LSP tool): on by default; servers override the command per language. Global only. */
+  lsp?: { enabled?: boolean; servers?: Record<string, { command?: string; args?: string[]; extensions?: string[]; disabled?: boolean; initializationOptions?: unknown }>; diagnosticsTimeoutMs?: number };
 }
 
 export function defaultSettings(): Settings {
@@ -187,6 +189,8 @@ export function sanitizeUntrustedSettings(s: Partial<Settings>): Partial<Setting
   delete out.trustedFolders;
   // Index roots would let a repository point the agent at other folders on the machine.
   delete out.index;
+  // Language server commands would let a repository pick programs for FreeCode to run.
+  delete out.lsp;
   if (out.router) {
     const r = { ...out.router };
     delete (r as Partial<Settings['router']>).allowPaid;
