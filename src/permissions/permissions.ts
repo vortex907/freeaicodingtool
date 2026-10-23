@@ -47,7 +47,7 @@ export function ruleMatches(rule: string, req: PermissionRequest, projectRoot: s
     r.tool === '*' ||
     r.tool === tool ||
     // Edit rules cover all file-modifying tools
-    (r.tool === 'Edit' && (tool === 'Write' || tool === 'MultiEdit')) ||
+    (r.tool === 'Edit' && (tool === 'Write' || tool === 'MultiEdit' || tool === 'NotebookEdit')) ||
     (r.tool.startsWith('mcp__') && tool.startsWith(r.tool + '__')) ||
     (r.tool.startsWith('mcp__') && tool === r.tool);
   if (!toolMatches) return false;

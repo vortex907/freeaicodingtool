@@ -226,7 +226,7 @@ export const ReadTool: Tool = {
   },
 };
 
-async function readIfExists(abs: string): Promise<string | null> {
+export async function readIfExists(abs: string): Promise<string | null> {
   try {
     return await fsp.readFile(abs, 'utf8');
   } catch {
@@ -234,13 +234,13 @@ async function readIfExists(abs: string): Promise<string | null> {
   }
 }
 
-function diffDisplay(abs: string, cwd: string, before: string, after: string, created: boolean) {
+export function diffDisplay(abs: string, cwd: string, before: string, after: string, created: boolean) {
   const hunks: DiffHunk[] = buildHunks(before, after);
   const { added, removed } = diffStats(hunks);
   return { kind: 'diff' as const, path: displayPath(abs, cwd), hunks, added, removed, created };
 }
 
-function outsideWarning(abs: string, ctx: ToolContext): string | undefined {
+export function outsideWarning(abs: string, ctx: ToolContext): string | undefined {
   return isInProject(abs, ctx.projectRoot, ctx.settings.permissions.additionalDirectories) ? undefined : 'This file is outside the project folder.';
 }
 
