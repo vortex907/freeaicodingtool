@@ -52,7 +52,9 @@ export function locate(text: string, opts: { line?: number; column?: number; sym
   const name = opts.symbol?.trim();
   if (line !== undefined && (line < 1 || line > lines.length)) return `Line ${line} is outside the file (it has ${lines.length} lines).`;
   if (name) {
-    const names = [name, name.replace(/\(\)$/, ''), name.slice(name.lastIndexOf('.') + 1)].filter((n, i, all) => n && all.indexOf(n) === i);
+    // "obj.greet()", "Foo::bar", "ptr->baz": the name as given, then without the call, then its last part.
+    const bare = name.replace(/\(\)$/, '');
+    const names = [name, bare, bare.split(/::|->|[.#]/).pop()!].filter((n, i, all) => n && all.indexOf(n) === i);
     for (const n of names) {
       const re = new RegExp(`(?<![\\w$])${escapeRegExp(n)}(?![\\w$])`, 'g');
       const hits = (i: number): Position[] => [...(lines[i] ?? '').matchAll(re)].map((m) => ({ line: i, character: m.index! }));
@@ -334,7 +336,7 @@ async function prepareRename(file: string, input: Record<string, unknown>, ctx: 
   const { files, error } = editsByFile(edit);
   if (error) return errorResult(`Rename not applied: ${error}.`);
   const changes: FileChange[] = [];
-  for (const f of files) {
+  for (const f of [...files].sort((a, b) => a.file.localeCompare(b.file))) {
     const before = await fsp.readFile(f.file, 'utf8').catch(() => null);
     if (before === null) return errorResult(`Rename not applied: ${f.file} cannot be read.`);
     let after: string;

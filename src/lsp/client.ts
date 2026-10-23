@@ -233,7 +233,7 @@ export class LspClient {
     } catch (e) {
       // A server that refused or never answered initialize is of no use: stop it and keep the reason.
       if (this.status !== 'exited') {
-        this.error = e instanceof RequestTimeoutError ? `did not finish starting within ${Math.round(timeoutMs / 1000)}s` : `failed to start: ${(e as Error).message.replace(`${label}: `, '')}`;
+        this.error = e instanceof RequestTimeoutError ? `did not finish starting within ${Math.round(timeoutMs / 100) / 10}s` : `failed to start: ${(e as Error).message.replace(`${label}: `, '')}`;
         this.kill();
       }
       throw e;

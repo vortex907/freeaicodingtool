@@ -5,7 +5,9 @@
 // Every word is a reference to the def of the same name. Hovering the word "crash" kills the server,
 // hovering "config" returns what the client answered to the server's own requests.
 // initializationOptions: { pull?: true } (pull diagnostics instead of push), { dedupe?: true } (skip
-// pushes that would repeat the last one), { noVersion?: true } (pushes without a version).
+// pushes that would repeat the last one), { noVersion?: true } (pushes without a version), { silent?: true }
+// (never reports diagnostics), { crashOnChange?: true } (exits on didChange), { initDelayMs?: n } (answers
+// initialize late), { failInit?: true } (answers initialize with an error).
 import { readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -15,7 +17,7 @@ type Range = { start: Pos; end: Pos };
 type Msg = { id?: number | string; method?: string; params?: Record<string, unknown>; result?: unknown; error?: unknown };
 
 let root = process.cwd();
-let opts: { pull?: boolean; dedupe?: boolean; noVersion?: boolean } = {};
+let opts: { pull?: boolean; dedupe?: boolean; noVersion?: boolean; silent?: boolean; crashOnChange?: boolean; initDelayMs?: number; failInit?: boolean } = {};
 const docs = new Map<string, { text: string; version: number }>();
 const lastPushed = new Map<string, string>();
 const clientAnswers: Record<string, unknown> = {};
@@ -120,7 +122,7 @@ function diagnose(uri: string): unknown[] {
 
 /** Like real servers: after a change, every open document is checked again. */
 function publishAll(): void {
-  if (opts.pull) return;
+  if (opts.pull || opts.silent) return;
   setTimeout(() => {
     for (const [uri, d] of docs) {
       const diagnostics = diagnose(uri);
@@ -149,19 +151,24 @@ function handle(msg: Msg): void {
       clientAnswers.capabilities = p.capabilities;
       clientAnswers.processId = p.processId;
       clientAnswers.workspaceFolders = p.workspaceFolders;
-      return reply(msg.id, {
-        capabilities: {
-          textDocumentSync: { openClose: true, change: 1, save: { includeText: false } },
-          definitionProvider: true,
-          referencesProvider: true,
-          hoverProvider: true,
-          documentSymbolProvider: true,
-          workspaceSymbolProvider: true,
-          renameProvider: { prepareProvider: true },
-          ...(opts.pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}),
-        },
-        serverInfo: { name: 'fake', version: '1.0' },
-      });
+      if (opts.failInit) return send({ id: msg.id, error: { code: -32603, message: 'cannot load this project' } });
+      const answer = () =>
+        reply(msg.id, {
+          capabilities: {
+            textDocumentSync: { openClose: true, change: 1, save: { includeText: false } },
+            definitionProvider: true,
+            referencesProvider: true,
+            hoverProvider: true,
+            documentSymbolProvider: true,
+            workspaceSymbolProvider: true,
+            renameProvider: { prepareProvider: true },
+            ...(opts.pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}),
+          },
+          serverInfo: { name: 'fake', version: '1.0' },
+        });
+      if (opts.initDelayMs) setTimeout(answer, opts.initDelayMs);
+      else answer();
+      return;
     }
     case 'initialized':
       // Servers ask the client things too; the answers are kept for the "config" hover.
@@ -176,6 +183,7 @@ function handle(msg: Msg): void {
       docs.set(p.textDocument.uri, { text: p.textDocument.text, version: p.textDocument.version });
       return publishAll();
     case 'textDocument/didChange': {
+      if (opts.crashOnChange) process.exit(3);
       const change = (p.contentChanges as { text: string; range?: Range }[]).at(-1)!;
       docs.set(p.textDocument.uri, { text: change.text, version: p.textDocument.version });
       return publishAll();

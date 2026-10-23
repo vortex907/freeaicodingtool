@@ -91,6 +91,8 @@ function normalizeOverrides(raw: unknown): Record<string, ServerOverride> {
 export class LspManager {
   enabled = true;
   diagnosticsTimeoutMs = DEFAULT_DIAGNOSTICS_TIMEOUT_MS;
+  /** A server nobody used for this long is stopped (started again on the next use). */
+  idleMs = IDLE_MS;
   private overrides: Record<string, ServerOverride> = {};
   private defs: ServerDef[] = serverDefs({});
   private entries = new Map<string, Entry>();
@@ -190,10 +192,10 @@ export class LspManager {
   private touch(entry: Entry): void {
     if (entry.idle) clearTimeout(entry.idle);
     entry.idle = setTimeout(() => {
-      if (Date.now() - entry.client.lastUsed < IDLE_MS) return this.touch(entry);
+      if (Date.now() - entry.client.lastUsed < this.idleMs) return this.touch(entry);
       debug('lsp', `stopping idle ${entry.client.label} (${entry.root})`);
       void this.stop(entry);
-    }, IDLE_MS);
+    }, this.idleMs);
     entry.idle.unref();
   }
 
