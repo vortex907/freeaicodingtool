@@ -29,6 +29,8 @@ const RETRY_FAILED_START_MS = 60_000;
 const RECHECK_MISSING_MS = 30_000;
 /** Files per language opened for the workspace diagnostics. */
 const PROJECT_FILES_PER_LANGUAGE = 30;
+/** Language servers are big processes: past this many, the one used least recently stops. */
+const MAX_SERVERS = 6;
 
 interface Entry {
   key: string;
@@ -105,6 +107,7 @@ export class LspManager {
   diagnosticsTimeoutMs = DEFAULT_DIAGNOSTICS_TIMEOUT_MS;
   /** A server nobody used for this long is stopped (started again on the next use). */
   idleMs = IDLE_MS;
+  maxServers = MAX_SERVERS;
   private overrides: Record<string, ServerOverride> = {};
   private defs: ServerDef[] = serverDefs({});
   private entries = new Map<string, Entry>();
@@ -167,6 +170,12 @@ export class LspManager {
   }
 
   private start(key: string, def: ServerDef, root: string, launch: Extract<Resolved, { ok: true }>['launch']): Entry {
+    const all = [...this.entries.values()];
+    if (all.length >= this.maxServers) {
+      const oldest = all.reduce((a, b) => (b.client.lastUsed < a.client.lastUsed ? b : a));
+      debug('lsp', `stopping ${oldest.client.label} (${oldest.root}) to make room`);
+      void this.stop(oldest);
+    }
     const client = new LspClient({ serverId: def.id, root, launch, languageId: (f) => languageIdFor(def, f), quietMs: def.quietMs, dedupes: def.dedupes });
     const entry: Entry = { key, def, root, client, ready: client.start(), wasReady: false };
     entry.ready.then(

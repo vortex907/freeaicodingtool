@@ -10,7 +10,7 @@ import { displayPath } from '../util/fs.js';
 import { escapeRegExp, truncate } from '../util/strings.js';
 import { isAbortError } from '../util/async.js';
 import { getLsp } from '../lsp/index.js';
-import { LspError, RequestTimeoutError, ServerExitedError, type Doc, type LspClient } from '../lsp/client.js';
+import { LspError, MAX_SYNC_BYTES, RequestTimeoutError, ServerExitedError, type Doc, type LspClient } from '../lsp/client.js';
 import { applyTextEdits, editsByFile } from '../lsp/edits.js';
 import { fileDiagnosticsReport, hoverText, outline, plural, projectDiagnosticsReport, sourceLine, symbolKind } from '../lsp/format.js';
 import { splitLines, uriKey, uriToPath, type Diagnostic, type DocumentSymbol, type Hover, type Location, type LocationLink, type Position, type SymbolInformation, type WorkspaceEdit } from '../lsp/protocol.js';
@@ -114,6 +114,10 @@ type Run<T> = { ok: true; value: T; client: LspClient } | { ok: false; result: T
 /** A mistake in the call (a name not in the file, a line out of range): told to the model as it is. */
 class UsageError extends Error {}
 
+function unsyncable(file: string, ctx: ToolContext): string {
+  return `${displayPath(file, ctx.session.cwd)} cannot be read, or it is larger than ${MAX_SYNC_BYTES / 1024 / 1024} MB (language servers do not get files that big).`;
+}
+
 /** Runs `fn` against the server for `file`; a server that crashes in the middle is started once more. */
 async function onServer<T>(file: string, ctx: ToolContext, fn: (client: LspClient) => Promise<T>): Promise<Run<T>> {
   for (let attempt = 0; ; attempt++) {
@@ -142,7 +146,7 @@ async function onServer<T>(file: string, ctx: ToolContext, fn: (client: LspClien
  */
 async function syncFile(client: LspClient, file: string, ctx: ToolContext): Promise<{ doc: Doc; changed: boolean }> {
   const synced = await client.sync(file, { save: true });
-  if (!synced) throw new Error(`cannot read ${file}`);
+  if (!synced) throw new UsageError(unsyncable(file, ctx));
   await client.whenIdle(client.readyAt + LOAD_WINDOW_MS - Date.now(), ctx.signal);
   return synced;
 }
@@ -313,7 +317,7 @@ async function diagnostics(file: string | null, ctx: ToolContext): Promise<ToolR
   const run = await onServer(file, ctx, async (c) => {
     const since = c.diagnosticsSeq;
     const synced = await c.sync(file, { save: true });
-    if (!synced) throw new Error(`cannot read ${file}`);
+    if (!synced) throw new UsageError(unsyncable(file, ctx));
     // A document the server already had unchanged: what it pushed last is current.
     const known = c.lastDiagnostics(file);
     const items: Diagnostic[] | null = !synced.changed && !c.pullsDiagnostics && known ? known : await c.diagnosticsFor(synced.doc, synced.changed ? since : -1, 15_000, ctx.signal);

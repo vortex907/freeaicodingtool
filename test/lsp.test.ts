@@ -384,6 +384,20 @@ test('one server per language and project folder, started on first use and stopp
   assert.ok(again.ok && again.client !== x.client, 'started again on the next use');
 });
 
+test('past the server limit, the least recently used server stops', async () => {
+  const m = manager({ servers: { fake: fake() } });
+  m.maxServers = 2;
+  const [p1, p2, p3] = [project({ 'a.fk': 'def a\n' }), project({ 'b.fk': 'def b\n' }), project({ 'c.fk': 'def c\n' })];
+  const first = await m.acquire(path.join(p1!, 'a.fk'), p1!);
+  const second = await m.acquire(path.join(p2!, 'b.fk'), p2!);
+  assert.ok(first.ok && second.ok);
+  await first.client.sync(path.join(p1!, 'a.fk'));
+  const third = await m.acquire(path.join(p3!, 'c.fk'), p3!);
+  assert.ok(third.ok);
+  await until(() => second.client.status === 'exited');
+  assert.equal(first.client.status, 'ready', 'the one used last keeps running');
+});
+
 // ------------------------------------------------------------------ the LSP tool
 
 test('LSP tool: definition, references, hover, symbols and diagnostics', async () => {
@@ -411,6 +425,9 @@ test('LSP tool: definition, references, hover, symbols and diagnostics', async (
   assert.match((await run({ action: 'definition', file_path: 'gone.fk', symbol: 'x' })).content, /^File not found: /);
   assert.match((await run({ action: 'fly', file_path: 'main.fk' })).content, /^Unknown or missing action\. Use one of: definition, references, hover, rename, symbols, diagnostics\.$/);
   assert.match((await run({ action: 'references' })).content, /^Missing required parameter for references: file_path$/);
+  // Files over the sync limit are not sent to servers.
+  const big = project({ 'big.fk': `def huge\n${'x'.repeat(2.1 * 1024 * 1024)}\n` });
+  assert.equal((await toolContext(big).run({ action: 'hover', file_path: 'big.fk', symbol: 'huge' })).content, 'big.fk cannot be read, or it is larger than 2 MB (language servers do not get files that big).');
   // An answer that only points at the import of the name is followed to the definition.
   const other = project({ 'lib.fk': 'def greet\n', 'imp.fk': 'import greet\ngreet here\n' });
   const followed = await toolContext(other).run({ action: 'definition', file_path: 'imp.fk', symbol: 'greet', line: 2 });
