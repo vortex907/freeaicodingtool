@@ -3,7 +3,7 @@
 // as on CI.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { applyLspSettings, getLsp, stopLanguageServers } from '../src/lsp/index.js';
@@ -14,9 +14,9 @@ import type { SessionState, ToolContext, ToolResult } from '../src/tools/types.j
 
 const dir = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'fc-tsls-')));
 const found = resolveServer(SERVER_DEFS.find((d) => d.id === 'typescript')!, dir);
-// The test project has no TypeScript of its own, so the server needs a global TypeScript 5 or 6.
-const fallback = found.ok ? (found.launch.initializationOptions as { tsserver?: { fallbackPath?: string } } | undefined)?.tsserver?.fallbackPath : undefined;
-const skip = found.ok && found.launch.label === 'typescript-language-server' && fallback ? false : 'needs typescript-language-server and a global TypeScript 5 or 6';
+// It never runs the project's own TypeScript, so it needs a TypeScript 5 or 6 outside the project.
+const tsserver = found.ok ? (found.launch.initializationOptions as { tsserver?: { path?: string } } | undefined)?.tsserver?.path : undefined;
+const skip = found.ok && found.launch.label === 'typescript-language-server' && tsserver ? false : 'needs typescript-language-server and a global TypeScript 5 or 6';
 
 after(() => stopLanguageServers());
 
@@ -89,4 +89,27 @@ test('typescript-language-server: definition, references, hover, errors after ed
   await files.undoLast();
   assert.equal(readFileSync(math, 'utf8'), mathText);
   assert.equal(readFileSync(main, 'utf8'), mainText);
+});
+
+test("typescript-language-server never runs the project's own TypeScript", { skip, timeout: 120_000 }, async () => {
+  const hostile = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'fc-tsls-own-')));
+  const put = (rel: string, text: string) => {
+    mkdirSync(path.dirname(path.join(hostile, rel)), { recursive: true });
+    writeFileSync(path.join(hostile, rel), text);
+    return path.join(hostile, rel);
+  };
+  put('package.json', JSON.stringify({ name: 'own-ts', private: true }));
+  put('tsconfig.json', JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ['src'] }));
+  // A repository can ship any node_modules/typescript; loading it would run its code.
+  const marker = path.join(hostile, 'ran.txt');
+  put('node_modules/typescript/package.json', JSON.stringify({ name: 'typescript', version: '5.9.9' }));
+  put('node_modules/typescript/lib/tsserver.js', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'the project code ran');\n`);
+  const file = put('src/a.ts', 'const n: number = 1;\n');
+  applyLspSettings({});
+  const acq = await getLsp().acquire(file, hostile, { waitMs: 60_000 });
+  assert.ok(acq.ok, acq.ok ? '' : acq.message);
+  assert.match(acq.client.label, /^typescript-language-server \(TypeScript [56]\.[\d.]+, the project has 5\.9\.9\)$/);
+  writeFileSync(file, "const n: number = 'one';\n");
+  assert.match((await getLsp().afterEdit([file], hostile))[0] ?? '', /found 1 error in src[\\/]a\.ts after this edit:\n  1:7 Type 'string' is not assignable to type 'number'\. \[TS2322\]/);
+  assert.equal(existsSync(marker), false, "the project's tsserver.js was never run");
 });

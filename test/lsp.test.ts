@@ -5,10 +5,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MessageReader, encodeMessage, fileUri, offsetAt, type Hover, type Message } from '../src/lsp/protocol.js';
 import { LspClient, RequestTimeoutError, ServerExitedError, quoteForCmd, spawnCommand, type ServerLaunch } from '../src/lsp/client.js';
 import { LspManager, applyLspSettings, getLsp, isLspEnabled, stopLanguageServers, type LspSettings } from '../src/lsp/index.js';
@@ -24,9 +24,11 @@ import { LSP_RULE, buildSystemPrompt } from '../src/agent/systemPrompt.js';
 import { loadConfig, sanitizeUntrustedSettings } from '../src/config/config.js';
 import { PROVIDERS } from '../src/providers/catalog.js';
 import { MockServer, text, tools } from './helpers/mockServer.js';
-import type { SessionState, ToolContext, ToolResult } from '../src/tools/types.js';
+import type { PermissionMode } from '../src/config/config.js';
+import type { PermissionRequest, SessionState, ToolContext, ToolResult } from '../src/tools/types.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const win = process.platform === 'win32';
 const FAKE = path.join(here, 'helpers', 'fakeLspServer.js');
 const BIN = path.resolve(here, '../../bin/freecode.js');
 const tmp = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'fc-lsp-')));
@@ -72,6 +74,38 @@ async function until(cond: () => boolean, ms = 5000): Promise<void> {
     await new Promise((r) => setTimeout(r, 20));
   }
 }
+
+/** Runs `fn` with only `dir` on PATH (which() lookups made with fresh see it). */
+function withPath<T>(dir: string, fn: () => T): T {
+  const saved = { PATH: process.env.PATH, Path: process.env.Path };
+  process.env.PATH = dir;
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+/** What a fake server got (initialize parameters, answers to its own requests): `file` starts with the word config. */
+async function serverView(c: LspClient, file: string): Promise<Record<string, any>> {
+  const synced = await c.sync(file);
+  let seen: Record<string, any> = {};
+  for (let i = 0; i < 100 && !('unknown-1' in seen); i++) {
+    seen = JSON.parse(hoverText(await c.request<Hover>('textDocument/hover', { textDocument: { uri: synced!.doc.uri }, position: { line: 0, character: 1 } })));
+    if (!('unknown-1' in seen)) await new Promise((r) => setTimeout(r, 20));
+  }
+  return seen;
+}
+
+function permissions(dir: string, mode: PermissionMode, allow: string[] = []): PermissionContext {
+  return { mode, allow, deny: [], ask: [], projectRoot: dir, additionalDirectories: [], sessionAllow: new Set(), interactive: true };
+}
+
+/** The start check the agent passes: what the permission rules and mode allow without asking. */
+const allowedBy = (perm: PermissionContext) => (req: PermissionRequest) => decide(req, perm).action === 'allow';
 
 function toolContext(dir: string) {
   const session = { cwd: dir, todos: [], shells: new Map(), shellCounter: 0, toolSeq: 0, permissionMode: 'default' } as never as SessionState;
@@ -215,7 +249,7 @@ test('client: initialize handshake, answers to server requests, request timeouts
   assert.equal(seen.processId, process.pid);
   assert.deepEqual(seen.workspaceFolders, [{ uri: fileUri(dir), name: path.basename(dir) }]);
   assert.equal(seen.capabilities.workspace.workspaceEdit.documentChanges, true);
-  assert.deepEqual(seen['cfg-1000'], [null, null], 'settings requests get the server defaults');
+  assert.deepEqual(seen['cfg-1000'], [null, null, null], 'settings requests get the server defaults');
   assert.equal(seen['progress-1'], null);
   assert.equal(seen['unknown-1'].error.code, -32601, 'unknown requests are refused, not left waiting');
   // The server reported progress (indexing) right after starting; whenIdle waits for its end.
@@ -590,22 +624,189 @@ test('settings: lsp is global only; turned off, the tool and its prompt line are
   assert.ok(!prompt(false).includes(LSP_RULE));
 });
 
-// ------------------------------------------------------------------ the agent
+// ------------------------------------------------------------------ servers that run project code
 
-test('agent: an Edit result carries the errors the language server found (real CLI, mock model)', async () => {
+function writeTypescript(dir: string, version: string): string {
+  mkdirSync(path.join(dir, 'lib'), { recursive: true });
+  writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'typescript', version }));
+  writeFileSync(path.join(dir, 'lib', 'tsserver.js'), '');
+  return path.join(dir, 'lib', 'tsserver.js');
+}
+
+/**
+ * A global npm folder like `npm install -g typescript-language-server typescript` makes (the server is
+ * the fake one), with TypeScript `ts` next to it, or none. Returns the folder to put on PATH.
+ */
+function globalTypescriptServer(ts: string | null): { binDir: string; tsserver: string } {
+  const g = project({});
+  const modules = win ? path.join(g, 'node_modules') : path.join(g, 'lib', 'node_modules');
+  const pkg = path.join(modules, 'typescript-language-server');
+  mkdirSync(path.join(pkg, 'lib'), { recursive: true });
+  writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'typescript-language-server', version: '5.3.0' }));
+  const cli = path.join(pkg, 'lib', 'cli.mjs');
+  writeFileSync(cli, `#!/usr/bin/env node\nimport ${JSON.stringify(pathToFileURL(FAKE).href)};\n`);
+  const tsserver = ts ? writeTypescript(path.join(modules, 'typescript'), ts) : '';
+  if (win) {
+    writeFileSync(path.join(g, 'typescript-language-server.cmd'), `@"${process.execPath}" "${cli}" %*\r\n`);
+    return { binDir: g, tsserver };
+  }
+  chmodSync(cli, 0o755);
+  mkdirSync(path.join(g, 'bin'));
+  symlinkSync(cli, path.join(g, 'bin', 'typescript-language-server'));
+  return { binDir: path.join(g, 'bin'), tsserver };
+}
+
+test('TypeScript: the server gets a TypeScript from outside the project; with only the project\'s own it needs approval', async () => {
+  const proj = project({ 'package.json': '{}', 'src/a.ts': 'config\n' });
+  writeTypescript(path.join(proj, 'node_modules', 'typescript'), '5.4.5');
+  const ts = SERVER_DEFS.find((d) => d.id === 'typescript')!;
+  // Installed together with the server, outside the project.
+  const outside = globalTypescriptServer('6.0.3');
+  const r = withPath(outside.binDir, () => resolveServer(ts, proj, undefined, true));
+  assert.ok(r.ok, r.ok ? '' : r.message);
+  assert.deepEqual(r.launch.initializationOptions, { tsserver: { path: outside.tsserver } });
+  assert.equal(r.launch.runsProjectCode, undefined, 'starts without asking');
+  assert.equal(r.launch.label, 'typescript-language-server (TypeScript 6.0.3, the project has 5.4.5)');
+  const c = new LspClient({ serverId: 'typescript', root: proj, launch: r.launch, languageId: () => 'typescript' });
+  clients.push(c);
+  await c.start();
+  assert.deepEqual((await serverView(c, path.join(proj, 'src', 'a.ts'))).initializationOptions, { tsserver: { path: outside.tsserver } }, 'the server is told which tsserver to load');
+  await c.shutdown();
+  // No TypeScript outside the project: it would load the project's own, so it waits for the user.
+  const alone = globalTypescriptServer(null);
+  const own = withPath(alone.binDir, () => resolveServer(ts, proj, undefined, true));
+  assert.ok(own.ok);
+  assert.equal(own.launch.initializationOptions, undefined);
+  assert.equal(own.launch.runsProjectCode, "loads the project's own TypeScript (node_modules/typescript), which is code from the project");
+  const m = manager({});
+  const acq = await withPath(alone.binDir, () => m.acquire(path.join(proj, 'src', 'a.ts'), proj));
+  assert.equal(acq.ok ? '' : acq.reason, 'needs-approval');
+  assert.match(acq.ok ? '' : acq.message, /^The TypeScript\/JavaScript language server was not started: typescript-language-server loads the project's own TypeScript .*permission rule LSP\(typescript\)/);
+  assert.equal(m.running(proj).length, 0);
+});
+
+test('rust-analyzer starts with build scripts, proc macros and cargo check on save turned off', async () => {
+  const rust = SERVER_DEFS.find((d) => d.id === 'rust')!;
+  const safe = { cargo: { buildScripts: { enable: false } }, procMacro: { enable: false }, checkOnSave: false };
+  const dir = project({ 'Cargo.toml': '[package]\nname = "x"\n', 'src/main.rs': 'config\n' });
+  const bin = project({ [`rust-analyzer${win ? '.cmd' : ''}`]: '' });
+  const found = withPath(bin, () => resolveServer(rust, dir, undefined, true));
+  assert.ok(found.ok, found.ok ? '' : found.message);
+  assert.deepEqual(found.launch.initializationOptions, safe);
+  assert.deepEqual(found.launch.settings, { 'rust-analyzer': safe });
+  assert.equal(found.launch.runsProjectCode, undefined, 'starts without asking');
+  // The settings go over them: more options, or one turned back on.
+  const custom = resolveServer(rust, dir, { command: process.execPath, args: [FAKE], initializationOptions: { cargo: { features: 'all' }, procMacro: { enable: true } } }, true);
+  assert.ok(custom.ok);
+  assert.deepEqual(custom.launch.initializationOptions, { cargo: { buildScripts: { enable: false }, features: 'all' }, procMacro: { enable: true }, checkOnSave: false });
+  // The server gets them when it starts and when it asks for its settings.
+  const plain = resolveServer(rust, dir, { command: process.execPath, args: [FAKE] }, true);
+  assert.ok(plain.ok);
+  const c = new LspClient({ serverId: 'rust', root: dir, launch: plain.launch, languageId: () => 'rust' });
+  clients.push(c);
+  await c.start();
+  const seen = await serverView(c, path.join(dir, 'src', 'main.rs'));
+  assert.deepEqual(seen.initializationOptions, safe);
+  assert.deepEqual(seen['cfg-1000'], [null, null, safe]);
+  await c.shutdown();
+});
+
+test('pyright, pylsp, clangd and gopls start as they are, unless the program is inside the project', () => {
+  const dir = project({ 'go.mod': 'module x\n', 'pyproject.toml': '', [`tools/gopls${win ? '.cmd' : ''}`]: '' });
+  const bin = project(Object.fromEntries(['pyright-langserver', 'pylsp', 'clangd', 'gopls'].map((n) => [`${n}${win ? '.cmd' : ''}`, ''])));
+  for (const id of ['python', 'cpp', 'go']) {
+    const r = withPath(bin, () => resolveServer(SERVER_DEFS.find((d) => d.id === id)!, dir, undefined, true));
+    assert.ok(r.ok, id);
+    assert.deepEqual([r.launch.runsProjectCode, r.launch.initializationOptions], [undefined, undefined], id);
+  }
+  const pylsp = project({ [`pylsp${win ? '.cmd' : ''}`]: '' });
+  const py = withPath(pylsp, () => resolveServer(SERVER_DEFS.find((d) => d.id === 'python')!, dir, undefined, true));
+  assert.ok(py.ok && py.launch.label === 'pylsp' && py.launch.runsProjectCode === undefined);
+  // A server program from the project's own folder (a PATH entry pointing into it) is the project's code.
+  const inside = withPath(path.join(dir, 'tools'), () => resolveServer(SERVER_DEFS.find((d) => d.id === 'go')!, dir, undefined, true));
+  assert.ok(inside.ok);
+  assert.match(inside.launch.runsProjectCode ?? '', /^is a program inside the project folder \(tools[\\/]gopls/);
+});
+
+test('C#: diagnostics after edits start the server only with the rule LSP(csharp) or in bypass mode', async () => {
+  applyLspSettings({ servers: { csharp: { command: process.execPath, args: [FAKE] } } });
+  const lsp = getLsp();
+  const p1 = project({ 'a.cs': 'use nothing\n' });
+  const a1 = path.join(p1, 'a.cs');
+  for (const mode of ['default', 'acceptEdits', 'plan'] as const) assert.deepEqual(await lsp.afterEdit([a1], p1, undefined, allowedBy(permissions(p1, mode))), [null], mode);
+  lsp.warmUp(a1, p1, allowedBy(permissions(p1, 'default')));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(lsp.running(p1).length, 0, 'not started by an edit or a read');
+  assert.match((await lsp.afterEdit([a1], p1, undefined, allowedBy(permissions(p1, 'default', ['LSP(csharp)']))))[0] ?? '', /^fakeLspServer found 1 error in a\.cs after this edit:\n {2}1:5 Unknown name nothing \[E2\]/);
+  assert.equal(lsp.running(p1).length, 1);
+  const p2 = project({ 'a.cs': 'use nothing\n' });
+  assert.match((await lsp.afterEdit([path.join(p2, 'a.cs')], p2, undefined, allowedBy(permissions(p2, 'bypassPermissions'))))[0] ?? '', /Unknown name nothing/, 'bypass mode starts it without asking');
+  // A check of the whole project says how to allow it.
+  const p3 = project({ 'a.cs': 'use nothing\n' });
+  const res = await lsp.projectDiagnostics(p3, { mayStart: allowedBy(permissions(p3, 'default')) });
+  assert.deepEqual(res.servers, []);
+  assert.match(res.notes.join('\n'), /^The C# language server was not started: fakeLspServer loads the project's build files \(MSBuild\), which can run code\. .*LSP\(csharp\)/);
+});
+
+test('C#: the LSP tool asks before it starts the server, then answers without asking again', async () => {
+  applyLspSettings({ servers: { csharp: { command: process.execPath, args: [FAKE] } } });
+  const dir = project({ 'a.cs': 'def alpha\nuse alpha\n' });
+  const { ctx, run } = toolContext(dir);
+  const prep = await LspTool.prepare({ action: 'hover', file_path: 'a.cs', symbol: 'alpha', line: 2 }, ctx);
+  assert.equal(prep.error, undefined, prep.error?.content);
+  const req = prep.permission!;
+  assert.deepEqual(
+    [req.tool, req.category, req.title, req.subject, req.specifier, req.ruleSuggestion, req.ruleLabel],
+    ['LSP', 'execute', 'Start the C# language server for this project', "fakeLspServer loads the project's build files (MSBuild), which can run code.", 'csharp', 'LSP(csharp)', 'the C# language server'],
+  );
+  // The user is asked by default; the rule or bypass mode allow it without asking; plan mode and a deny rule refuse it.
+  const perm = permissions(dir, 'default');
+  assert.equal(decide(req, perm).action, 'ask');
+  assert.equal(decide(req, { ...perm, allow: ['LSP(csharp)'] }).action, 'allow');
+  assert.equal(decide(req, { ...perm, mode: 'bypassPermissions' }).action, 'allow');
+  assert.equal(decide(req, { ...perm, mode: 'plan' }).action, 'deny');
+  assert.equal(decide(req, { ...perm, mode: 'bypassPermissions', deny: ['LSP(csharp)'] }).action, 'deny');
+  assert.equal(getLsp().running(dir).length, 0, 'nothing runs before the user allows it');
+  assert.equal((await prep.execute()).content, 'alpha at a.cs:2:5:\n```fake\nalpha: symbol\n```');
+  assert.equal(getLsp().running(dir).length, 1);
+  assert.equal((await LspTool.prepare({ action: 'definition', file_path: 'a.cs', symbol: 'alpha', line: 2 }, ctx)).permission, undefined, 'allowed for this project now');
+  assert.equal((await run({ action: 'definition', file_path: 'a.cs', symbol: 'alpha', line: 2 })).content, 'Definition of alpha:\na.cs:1:5  def alpha');
+  // Edits in the project are checked from now on.
+  writeFileSync(path.join(dir, 'a.cs'), 'def alpha\nuse beta\n');
+  assert.match((await getLsp().afterEdit([path.join(dir, 'a.cs')], dir, undefined, allowedBy(perm)))[0] ?? '', /Unknown name beta/);
+  // Nobody to ask (a run without a user): the answer says how to allow it.
+  const other = project({ 'b.cs': 'use x\n' });
+  const quiet = toolContext(other).ctx;
+  quiet.services.permit = (r) => decide(r, { ...permissions(other, 'default'), interactive: false });
+  const refused = await LspTool.prepare({ action: 'hover', file_path: 'b.cs', symbol: 'x' }, quiet);
+  assert.match(refused.error?.content ?? '', /^The C# language server was not started: fakeLspServer loads the project's build files \(MSBuild\), which can run code\. It starts once you allow it for this project: .*the permission rule LSP\(csharp\) .* Right now: needs approval \(non-interactive run\)\.$/);
+  // A rename asks to start the server first; the change itself is reviewed in the next call.
+  const ren = await LspTool.prepare({ action: 'rename', file_path: 'b.cs', symbol: 'x', new_name: 'y' }, toolContext(other).ctx);
+  assert.equal(ren.permission?.title, 'Start the C# language server for this project');
+  assert.match((await ren.execute()).content, /^Allowed the C# language server for this project\. Run the rename again to review the change and apply it\.$/);
+  assert.equal(readFileSync(path.join(other, 'b.cs'), 'utf8'), 'use x\n', 'nothing renamed yet');
+});
+
+// ------------------------------------------------------------------ the agent (real CLI, mock model)
+
+/**
+ * Runs `freecode -p` in a new project with these files and language server settings. The mock model
+ * makes each call in its own step, then says "Done."; returns the tool results it got back.
+ */
+async function agentRun(files: Record<string, string>, servers: Record<string, ServerOverride>, calls: { name: string; args: Record<string, unknown> }[], flags: string[]): Promise<{ results: string[]; proj: string }> {
   const server = new MockServer();
   await server.start();
   try {
     const home = project({});
-    const proj = project({ 'a.fk': 'def alpha\nuse alpha\n' });
+    const proj = project(files);
     const providers: Record<string, unknown> = {
       lspm: { baseURL: server.baseURL('lspm'), apiKey: 'test-key', discover: false, models: [{ id: 'm1', quality: 80, context: 100000, maxOutput: 4096, tools: 'native', speed: 50 }] },
     };
     for (const p of PROVIDERS) providers[p.id] ??= { enabled: false };
-    writeFileSync(path.join(home, 'config.json'), JSON.stringify({ setupCompleted: true, router: { enabled: false, maxWaitSeconds: 1 }, providers, lsp: { servers: { fake: fake() } } }));
-    server.script('lspm', [tools({ name: 'Edit', args: { file_path: 'a.fk', old_string: 'use alpha', new_string: 'use alpah' } }), text('Done.')]);
+    writeFileSync(path.join(home, 'config.json'), JSON.stringify({ setupCompleted: true, router: { enabled: false, maxWaitSeconds: 1 }, providers, lsp: { servers } }));
+    server.script('lspm', [...calls.map((c) => tools(c)), text('Done.')]);
     const r = await new Promise<{ code: number; stderr: string }>((resolve) => {
-      const child = spawn(process.execPath, [BIN, '-p', 'fix the name', '--yolo'], {
+      const child = spawn(process.execPath, [BIN, '-p', 'go ahead', ...flags], {
         cwd: proj,
         env: { ...process.env, FREECODE_HOME: home, NO_COLOR: '1', HOME: home, USERPROFILE: home, FREECODE_DEBUG: '' },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -621,12 +822,35 @@ test('agent: an Edit result carries the errors the language server found (real C
       });
     });
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(readFileSync(path.join(proj, 'a.fk'), 'utf8'), 'def alpha\nuse alpah\n');
-    const messages = server.requestsFor('lspm')[1]!.body.messages as { role: string; content: string }[];
-    const result = messages.find((msg) => msg.role === 'tool')!.content;
-    assert.match(result, /^Edited a\.fk\./);
-    assert.match(result, /\n\nfakeLspServer found 1 error in a\.fk after this edit:\n {2}2:5 Unknown name alpah \[E2\]\n/);
+    const messages = server.requestsFor('lspm').at(-1)!.body.messages as { role: string; content: string }[];
+    return { results: messages.filter((m) => m.role === 'tool').map((m) => m.content), proj };
   } finally {
     await server.stop();
+  }
+}
+
+test('agent: an Edit result carries the errors the language server found (real CLI, mock model)', async () => {
+  const { results, proj } = await agentRun({ 'a.fk': 'def alpha\nuse alpha\n' }, { fake: fake() }, [{ name: 'Edit', args: { file_path: 'a.fk', old_string: 'use alpha', new_string: 'use alpah' } }], ['--yolo']);
+  assert.equal(readFileSync(path.join(proj, 'a.fk'), 'utf8'), 'def alpha\nuse alpah\n');
+  assert.match(results[0]!, /^Edited a\.fk\./);
+  assert.match(results[0]!, /\n\nfakeLspServer found 1 error in a\.fk after this edit:\n {2}2:5 Unknown name alpah \[E2\]\n/);
+});
+
+test('agent: the C# server starts without asking only with the rule LSP(csharp) or in bypass mode (real CLI)', async () => {
+  const files = { 'a.cs': 'use alpha\n' };
+  const servers = { csharp: { command: process.execPath, args: [FAKE] } };
+  const calls = [
+    { name: 'Edit', args: { file_path: 'a.cs', old_string: 'use alpha', new_string: 'use beta' } },
+    { name: 'LSP', args: { action: 'hover', file_path: 'a.cs', symbol: 'beta' } },
+  ];
+  // Edits are allowed, the server is not (no rule, nobody to ask): no report, and the tool says how to allow it.
+  let { results } = await agentRun(files, servers, calls, ['--accept-edits']);
+  assert.match(results[0]!, /^Edited a\.cs\./);
+  assert.doesNotMatch(results[0]!, /Unknown name/);
+  assert.match(results[1]!, /^The C# language server was not started: .*permission rule LSP\(csharp\)/);
+  for (const flags of [['--accept-edits', '--allowedTools', 'LSP(csharp)'], ['--yolo']]) {
+    ({ results } = await agentRun(files, servers, calls, flags));
+    assert.match(results[0]!, /\n\nfakeLspServer found 1 error in a\.cs after this edit:\n {2}1:5 Unknown name beta \[E2\]\n/, flags.join(' '));
+    assert.equal(results[1], 'beta at a.cs:1:5:\n```fake\nbeta: symbol\n```', flags.join(' '));
   }
 });

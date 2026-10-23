@@ -364,11 +364,14 @@ export class LspManager {
     const { client, def, root } = acq;
     const prev = client.doc(file);
     const prevItems = prev ? client.lastDiagnostics(file) : undefined;
-    const before = prev && prevItems ? { items: prevItems, text: prev.text } : undefined;
+    const prevText = prev?.text;
     const othersBefore = new Map(client.allDiagnostics().map((e) => [uriKey(e.uri), e.items]));
     const since = client.diagnosticsSeq;
     const synced = await client.sync(file, { save: true });
-    return synced ? { client, def, root, file, before, othersBefore, since, synced } : null;
+    if (!synced) return null;
+    // A server that already had this content (an LSP call after the edit sent it) knows nothing from before the edit.
+    const before = synced.changed && prevItems && prevText !== undefined ? { items: prevItems, text: prevText } : undefined;
+    return { client, def, root, file, before, othersBefore, since, synced };
   }
 
   private async checkEdit(s: SentEdit, projectRoot: string, deadline: number, edited: Set<string>, told: Set<LspClient>, signal?: AbortSignal): Promise<string | null> {

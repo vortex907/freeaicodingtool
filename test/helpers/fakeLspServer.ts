@@ -5,7 +5,7 @@
 //   import NAME    the definition of a use of NAME in this file is this line (like a server that is
 //                  still loading the project); asked on this line, it is the def
 // Every word is a reference to the def of the same name. Hovering the word "crash" kills the server,
-// hovering "config" returns what the client answered to the server's own requests.
+// hovering "config" returns what the server got: initialize parameters and the answers to its requests.
 // initializationOptions: { pull?: true } (pull diagnostics instead of push), { dedupe?: true } (skip
 // pushes that would repeat the last one), { noVersion?: true } (pushes without a version), { silent?: true }
 // (never reports diagnostics), { crashOnChange?: true } (exits on didChange), { initDelayMs?: n } (answers
@@ -153,6 +153,7 @@ function handle(msg: Msg): void {
       clientAnswers.capabilities = p.capabilities;
       clientAnswers.processId = p.processId;
       clientAnswers.workspaceFolders = p.workspaceFolders;
+      clientAnswers.initializationOptions = p.initializationOptions;
       if (opts.failInit) return send({ id: msg.id, error: { code: -32603, message: 'cannot load this project' } });
       const answer = () =>
         reply(msg.id, {
@@ -174,7 +175,7 @@ function handle(msg: Msg): void {
     }
     case 'initialized':
       // Servers ask the client things too; the answers are kept for the "config" hover.
-      send({ id: `cfg-${nextId++}`, method: 'workspace/configuration', params: { items: [{ section: 'fake' }, { section: 'other' }] } });
+      send({ id: `cfg-${nextId++}`, method: 'workspace/configuration', params: { items: [{ section: 'fake' }, { section: 'other' }, { section: 'rust-analyzer' }] } });
       send({ id: 'progress-1', method: 'window/workDoneProgress/create', params: { token: 'index' } });
       send({ id: 'unknown-1', method: 'fake/somethingNew', params: {} });
       send({ method: '$/progress', params: { token: 'index', value: { kind: 'begin', title: 'Indexing' } } });
