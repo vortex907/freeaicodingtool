@@ -252,6 +252,21 @@ test('client: a server that is missing, refuses to start or never finishes start
   assert.equal(fine.error, undefined);
 });
 
+test('client: a server is busy while it reports work and for a moment after starting, unless it indexes in the background', async () => {
+  const dir = project({});
+  const c = client(dir);
+  await c.start();
+  assert.equal(c.busy, true, 'just started: it may not have reported its loading yet');
+  await c.whenIdle(5000);
+  assert.equal(c.busy, false);
+  // clangd indexes for minutes and answers meanwhile, so its progress is no reason to wait.
+  const background = new LspClient({ serverId: 'fake', root: dir, launch: { command: process.execPath, args: [FAKE], label: 'fake' }, languageId: () => 'fake', indexesInBackground: true });
+  clients.push(background);
+  await background.start();
+  assert.equal(background.busy, false);
+  await Promise.all([c.shutdown(), background.shutdown()]);
+});
+
 test('client: diagnostics of a server that skips unchanged ones stand once it is quiet', async () => {
   const dir = project({ 'a.fk': 'use gone\n' });
   const a = path.join(dir, 'a.fk');

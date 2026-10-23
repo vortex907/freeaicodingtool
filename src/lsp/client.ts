@@ -40,6 +40,8 @@ export interface ClientOptions {
   quietMs?: number;
   /** The server does not push diagnostics again when they did not change. */
   dedupes?: boolean;
+  /** The work the server reports runs in the background and does not hold up its answers. */
+  indexesInBackground?: boolean;
 }
 
 export interface Doc {
@@ -182,6 +184,7 @@ export class LspClient {
 
   /** Background work in progress (indexing, loading the project, a build). */
   get busy(): boolean {
+    if (this.opts.indexesInBackground) return false;
     return this.progress.size > 0 || !this.quiescent || (this.status === 'ready' && Date.now() - Math.max(this.readyAt, this.openedAt) < REPORT_GRACE_MS);
   }
 

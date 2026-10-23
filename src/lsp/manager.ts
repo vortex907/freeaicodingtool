@@ -176,7 +176,7 @@ export class LspManager {
       debug('lsp', `stopping ${oldest.client.label} (${oldest.root}) to make room`);
       void this.stop(oldest);
     }
-    const client = new LspClient({ serverId: def.id, root, launch, languageId: (f) => languageIdFor(def, f), quietMs: def.quietMs, dedupes: def.dedupes });
+    const client = new LspClient({ serverId: def.id, root, launch, languageId: (f) => languageIdFor(def, f), quietMs: def.quietMs, dedupes: def.dedupes, indexesInBackground: def.indexesInBackground });
     const entry: Entry = { key, def, root, client, ready: client.start(), wasReady: false };
     entry.ready.then(
       () => (entry.wasReady = true),

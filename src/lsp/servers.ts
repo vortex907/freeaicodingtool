@@ -33,9 +33,10 @@ export interface ServerDef {
   install: () => string;
   /** An installed server for this project folder, or null. `fresh` skips cached PATH lookups. */
   find: (root: string, fresh: boolean) => ServerLaunch | null;
-  /** See ClientOptions.quietMs and dedupes. */
+  /** See ClientOptions.quietMs, dedupes and indexesInBackground. */
   quietMs?: number;
   dedupes?: boolean;
+  indexesInBackground?: boolean;
   /** Diagnostics that cannot be trusted without more project setup: a note saying what is missing. */
   unreliable?: (items: Diagnostic[], root: string) => string | null;
 }
@@ -216,6 +217,8 @@ export const SERVER_DEFS: ServerDef[] = [
     install: () => (isWindows ? 'winget install LLVM.LLVM' : isMac ? 'brew install llvm' : 'sudo apt install clangd'),
     find: (_root, fresh) => firstBin([{ name: 'clangd', args: [], dirs: llvmBin }], fresh),
     unreliable: clangdUnreliable,
+    // Its background index can take many minutes; it answers meanwhile.
+    indexesInBackground: true,
   },
   {
     id: 'csharp',
