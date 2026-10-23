@@ -166,7 +166,7 @@ export const ReadTool: Tool = {
         if (st.isDirectory()) return fail(`${abs} is a directory, not a file. Use LS or Glob to list its contents.`);
         const ext = path.extname(abs).toLowerCase();
         if (VIEWABLE_IMAGE_EXT.has(ext)) return readImage(abs, st.size, ctx);
-        if (OTHER_IMAGE_EXT.has(ext)) return fail(`${abs} is a ${ext.slice(1).toUpperCase()} image (${formatBytes(st.size)}). Read shows PNG, JPEG, GIF and WebP images; convert it to one of those first.`);
+        if (OTHER_IMAGE_EXT.has(ext)) return fail(`${abs} is an image in ${ext.slice(1).toUpperCase()} format (${formatBytes(st.size)}). Read shows PNG, JPEG, GIF and WebP images; convert it to one of those first.`);
         if (ext === '.pdf') return readPdfFile(abs, input, ctx);
         if (BINARY_EXT.has(ext)) return fail(`${abs} is a binary file (${formatBytes(st.size)}) and cannot be read as text.`);
         let offset = Math.max(1, Math.floor(numParam(input, 'offset', 'start_line', 'line') ?? 1));
