@@ -1,0 +1,90 @@
+# Builds the Windows setup and publishes it as a GitHub release. FreeCode's built-in updater
+# downloads new versions from these releases (checking the setup against SHA256SUMS.txt).
+#
+# To release: bump "version" in package.json and push. If there is no release for that version
+# yet, this builds and publishes v<version> (creating the tag). Pushing a v* tag works too.
+name: Release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      needed: ${{ steps.v.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release v${VERSION} already exists."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows:
+    needs: check
+    if: needs.check.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install build tools
+        # apt on the hosted runner has hung for the whole step before (a slow mirror or a third-party
+        # repository). Use only the Ubuntu archive, limit every attempt and switch mirrors in between.
+        timeout-minutes: 25
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          PKGS="nsis g++-mingw-w64-x86-64 unzip zip"
+          . /etc/os-release
+          APT_DIR="$(mktemp -d)"
+          mkdir -p "$APT_DIR/parts"
+          ok=""
+          for MIRROR in http://azure.archive.ubuntu.com/ubuntu http://archive.ubuntu.com/ubuntu http://mirrors.edge.kernel.org/ubuntu; do
+            for POCKET in "" -updates -security; do
+              echo "deb $MIRROR ${VERSION_CODENAME}${POCKET} main universe"
+            done > "$APT_DIR/sources.list"
+            OPTS="-o Dir::Etc::SourceList=$APT_DIR/sources.list -o Dir::Etc::SourceParts=$APT_DIR/parts -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=120"
+            echo "::group::apt via $MIRROR"
+            if timeout -k 10 180 sudo -E apt-get $OPTS update -q && timeout -k 10 420 sudo -E apt-get $OPTS install -y -q --no-install-recommends $PKGS; then ok=1; fi
+            echo "::endgroup::"
+            [ -n "$ok" ] && break
+            echo "::warning::apt via $MIRROR failed, trying the next mirror"
+          done
+          command -v makensis && command -v x86_64-w64-mingw32-g++
+      - run: npm ci
+      - run: npm test
+      - name: Build the Windows setup
+        run: node scripts/build-windows.mjs
+      - name: Checksums
+        working-directory: release
+        run: sha256sum FreeCode-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "FreeCode ${VERSION}" --generate-notes
+          gh release upload "$TAG" release/FreeCode-Setup-*.exe release/FreeCode-*-win-x64.zip release/SHA256SUMS.txt --clobber
