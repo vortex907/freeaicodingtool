@@ -75,6 +75,8 @@ export class DapClient {
     const child = this.child;
     const name = p.command.split(/[\\/]/).pop();
     child.stdin!.on('error', () => undefined);
+    // The program of a TCP adapter (dlv) reads the adapter's stdin: give it end of file, not a pipe that never delivers.
+    if (p.transport === 'tcp') child.stdin!.end();
     child.stderr!.on('data', (b: Buffer) => this.stdio(b.toString('utf8')));
     if (p.transport === 'stdio') child.stdout!.on('data', (b: Buffer) => this.receive(b));
     else child.stdout!.on('data', (b: Buffer) => this.stdio(b.toString('utf8')));
@@ -248,6 +250,7 @@ export class DapClient {
 
   /** Resolves with the body of the next `event` (rejects on timeout or when the adapter goes away). */
   waitForEvent<T = unknown>(event: string, timeoutMs: number): Promise<T> {
+    if (this.closed) return Promise.reject(new DapError(this.closeReason || 'The debug adapter is not running.'));
     return new Promise<T>((resolve, reject) => {
       const done = () => {
         clearTimeout(timer);

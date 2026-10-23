@@ -97,6 +97,7 @@ export class DapSession {
   /** Disconnected: later events (lldb-dap 18 crashes on exit) are ignored. */
   private closed = false;
   private disposed = false;
+  private idleClosed = false;
   private readonly lineBreakpoints = new Map<string, BreakpointSpec[]>();
   private functionBreakpoints: BreakpointSpec[] = [];
   private readonly waiters = new Set<() => void>();
@@ -239,7 +240,10 @@ export class DapSession {
   private armIdle(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.ended) return;
-    this.idleTimer = setTimeout(() => void this.dispose(), IDLE_MS);
+    this.idleTimer = setTimeout(() => {
+      this.idleClosed = true;
+      void this.dispose();
+    }, IDLE_MS);
     this.idleTimer.unref();
   }
 
@@ -420,6 +424,7 @@ export class DapSession {
 
   private endText(): string {
     if (this.crash) return `The debug adapter stopped unexpectedly: ${this.crash}`;
+    if (this.idleClosed) return `The debug session was closed after ${formatDuration(IDLE_MS)} without use. Start it again.`;
     return `${this.exitCode !== null ? `The program exited with code ${this.exitCode}.` : 'The program ended.'} The debug session is over.`;
   }
 
@@ -789,7 +794,8 @@ export class DapSession {
       const wasRunning = this.running;
       const frameId = wasRunning ? undefined : (await this.frameAt(0).catch(() => null))?.id;
       const r = await this.client.request<EvaluateResponseBody>('evaluate', { expression: command, ...(frameId !== undefined ? { frameId } : {}), context: 'repl' }, Math.max(REQUEST_MS, w.timeoutMs));
-      const text = cleanOutput(r.result ?? '').replace(/\s+$/, '') || '(no output)';
+      // lldb-dap repeats the command first ("(lldb) bt").
+      const text = cleanOutput(r.result ?? '').replace(/^\(lldb\) [^\n]*\n/, '').replace(/\s+$/, '') || '(no output)';
       // A console command can resume the program (lldb: "continue", "thread step-over").
       await sleep(100);
       if (!wasRunning && (this.running || this.stopSeq > mark)) {
