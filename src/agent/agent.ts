@@ -1,5 +1,4 @@
 // The agent loop: send conversation -> stream the answer -> run requested tools -> repeat until done.
-import * as path from 'node:path';
 import type { ChatMessage, ImageAttachment, ToolCall, Usage } from '../providers/types.js';
 import type { PermissionMode, Settings } from '../config/config.js';
 import { updateProjectSettings } from '../config/config.js';
@@ -21,6 +20,7 @@ import { plainPunctuation } from '../shared/punctuation.js';
 import { previewAfterEdit } from '../tools/browserTool.js';
 import { checkSyntax } from '../tools/syntaxCheck.js';
 import { diagnosticsAfterEdit } from '../lsp/index.js';
+import { resolvePath } from '../tools/listFiles.js';
 import { strParam } from '../tools/types.js';
 import type { McpManager } from '../mcp/manager.js';
 import { debug } from '../util/log.js';
@@ -449,11 +449,11 @@ export class Agent {
       if (batch.length > 1) await Promise.all(batch.map(run));
       else await run(batch[0]!);
     }
-    // UI files changed while a Browser page is open: reload it and tell the model what broke.
-    const edits = calls.filter((c) => /^(Write|Edit|MultiEdit)$/.test(c.name) && results.get(c.id) && !results.get(c.id)!.isError);
+    // Changed files are checked at once (syntax, language server); an open Browser page is reloaded.
+    const edits = calls.filter((c) => /^(Write|Edit|MultiEdit)$/.test(findTool(tools, c.name)?.name ?? '') && results.get(c.id) && !results.get(c.id)!.isError);
     if (edits.length && !signal.aborted) {
       const paths = edits.map((c) => strParam(parseToolArguments(c.arguments).value, 'file_path', 'path', 'filePath') ?? '');
-      const files = paths.map((p) => (p ? path.resolve(this.opts.session.cwd, p) : ''));
+      const files = paths.map((p) => (p ? resolvePath(p, this.opts.session.cwd) : ''));
       // A broken edit is cheapest to fix right away, while the model still has the change in mind.
       // The language server check runs alongside; a missing or slow server just means no report.
       const [checks, diagnostics] = await Promise.all([Promise.all(files.map((f) => (f ? checkSyntax(f, this.opts.projectRoot) : null))), diagnosticsAfterEdit(files, this.opts.projectRoot, signal)]);

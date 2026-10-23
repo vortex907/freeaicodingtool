@@ -21,7 +21,7 @@ import { type SavedSession, newSessionId, saveSession, sessionTitle } from './se
 import { gitRoot } from './util/git.js';
 import { runHooks } from './agent/hooks.js';
 import { applyIndexSettings, getIndex, indexPromptSection, isCodeIndexEnabled } from './codeindex/index.js';
-import { applyLspSettings, stopLanguageServers } from './lsp/index.js';
+import { applyLspSettings, isLspEnabled, stopLanguageServers } from './lsp/index.js';
 import { debug } from './util/log.js';
 import { refreshToolchain } from './util/toolchain.js';
 
@@ -177,6 +177,7 @@ export class App {
         skillsSection: skillsPromptSection(loadSkillsCached(this.projectRoot)),
         indexSection: indexPromptSection(this.projectRoot),
         codeSearch: isCodeIndexEnabled(),
+        lsp: isLspEnabled(),
       },
       this.envCache.text,
     );

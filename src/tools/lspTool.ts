@@ -24,14 +24,20 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_REFERENCE_LINES = 80;
 
 export function parseAction(raw: string | undefined): Action | null {
-  const a = (raw ?? '').toLowerCase().replace(/[\s_-]+/g, '');
+  // "textDocument/definition", "find_references", "get_diagnostics", "documentSymbols" ...
+  const a = (raw ?? '')
+    .toLowerCase()
+    .replace(/[\s_/-]+/g, '')
+    .replace(/^(textdocument|workspace)(?=.)/, '')
+    .replace(/^(get|find|goto|show|list|lookup)(?=.)/, '');
   if ((ACTIONS as readonly string[]).includes(a)) return a as Action;
-  if (/^(goto)?(def|decl|impl)/.test(a)) return 'definition';
-  if (/^(find)?(ref|usage|uses|callers)/.test(a)) return 'references';
-  if (/^(hover|type|info|signature|doc)/.test(a)) return 'hover';
+  if (/^(type)?(def|decl|impl)/.test(a)) return 'definition';
+  if (/^(ref|usage|uses|callers|occurrence)/.test(a)) return 'references';
   if (/^rename/.test(a)) return 'rename';
-  if (/^(document|workspace)?(symbol|outline)/.test(a)) return 'symbols';
-  if (/^(diag|error|problem|check|lint)/.test(a)) return 'diagnostics';
+  // Before hover, which takes "doc...".
+  if (/^(document|workspace|file|project)?(symbol|outline)/.test(a)) return 'symbols';
+  if (/^(diag|error|problem|check|lint|warning)/.test(a)) return 'diagnostics';
+  if (/^(hover|type|info|signature|doc|quickinfo)/.test(a)) return 'hover';
   return null;
 }
 
@@ -355,8 +361,9 @@ async function prepareRename(file: string, input: Record<string, unknown>, ctx: 
       subject: `Rename ${name} to ${newName} in ${where} (${plural(total, 'change')})`,
       description: changes.map((c) => `${displayPath(c.file, ctx.projectRoot)} (${c.count})`).join(', '),
       preview,
-      // An outside file decides: acceptEdits only covers files in the project.
+      // Rules and acceptEdits are checked for every file; an outside one is named first.
       path: (outside[0] ?? changes[0]!).file,
+      paths: changes.map((c) => c.file),
       danger: outside.length ? `This also changes ${plural(outside.length, 'file')} outside the project: ${outside.map((c) => c.file).join(', ')}` : undefined,
     },
     execute: async () => {

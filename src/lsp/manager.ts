@@ -70,6 +70,7 @@ function settle(p: Promise<unknown>, ms: number, signal?: AbortSignal): Promise<
       signal?.removeEventListener('abort', onAbort);
       resolve(v);
     }
+    if (signal?.aborted) return done('pending');
     signal?.addEventListener('abort', onAbort, { once: true });
     p.then(
       () => done('ok'),
@@ -269,7 +270,9 @@ export class LspManager {
     const since = client.diagnosticsSeq;
     const synced = await client.sync(file, { save: true });
     if (!synced) return null;
-    const items = await client.diagnosticsFor(synced.doc, since, Math.max(0, deadline - Date.now()), signal);
+    // Content the server already had (a Write of the same text) gets no new push: the last one stands.
+    const known = !synced.changed && !client.pullsDiagnostics ? client.lastDiagnostics(file) : undefined;
+    const items = known ?? (await client.diagnosticsFor(synced.doc, since, Math.max(0, deadline - Date.now()), signal));
     if (!items || def.unreliable?.(items, root)) return null;
     const own = editReport({ rel: displayPath(file, projectRoot), label: client.label, items, text: synced.doc.text, before });
     const others = await this.newErrorsElsewhere(client, since, othersBefore, edited, projectRoot, deadline, signal);

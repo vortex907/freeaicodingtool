@@ -306,7 +306,9 @@ export function resolveServer(def: ServerDef, root: string, override?: ServerOve
   if (override?.disabled) return { ok: false, reason: 'disabled', message: `The ${def.name} language server is turned off in the settings (lsp.servers.${def.id}.disabled).` };
   if (override?.command) {
     const cmd = override.command.trim();
-    const found = path.isAbsolute(cmd) ? (isFile(cmd) ? cmd : null) : which(cmd, { fresh });
+    // which() adds the Windows extensions itself, so "pylsp.exe" is looked up as "pylsp".
+    const bare = isWindows ? cmd.replace(/\.(exe|cmd|bat|com)$/i, '') : cmd;
+    const found = path.isAbsolute(cmd) ? (isFile(cmd) ? cmd : null) : which(bare, { fresh });
     if (!found) return { ok: false, reason: 'bad-override', message: `The language server command from the settings (lsp.servers.${def.id}.command = "${cmd}") was not found.` };
     const args = Array.isArray(override.args) ? override.args.map(String) : [];
     // "node server.js" is better known by its script than by the interpreter.

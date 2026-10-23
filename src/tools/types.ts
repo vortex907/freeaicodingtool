@@ -21,6 +21,8 @@ export interface PermissionRequest {
   ruleLabel?: string;
   /** Absolute path for file operations */
   path?: string;
+  /** Every file a multi-file edit changes (LSP rename): rules and acceptEdits must cover each one. */
+  paths?: string[];
   /** Raw command for Bash */
   command?: string;
   /** URL / domain for network tools */

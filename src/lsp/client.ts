@@ -212,25 +212,37 @@ export class LspClient {
     trackChild(child);
     debug('lsp', `starting ${label} in ${this.opts.root}: ${command} ${args.join(' ')}`);
     const root = this.opts.root;
-    const init = (await this.request(
-      'initialize',
-      {
-        processId: process.pid,
-        clientInfo: { name: 'FreeCode', version: VERSION },
-        locale: 'en',
-        rootPath: root,
-        rootUri: fileUri(root),
-        workspaceFolders: [{ uri: fileUri(root), name: path.basename(root) || root }],
-        initializationOptions: this.opts.launch.initializationOptions,
-        capabilities: CLIENT_CAPABILITIES,
-        trace: 'off',
-      },
-      timeoutMs,
-    )) as { capabilities?: Record<string, unknown>; serverInfo?: { name?: string } } | null;
+    type InitializeResult = { capabilities?: Record<string, unknown>; serverInfo?: { name?: string } } | null;
+    let init: InitializeResult;
+    try {
+      init = await this.request<InitializeResult>(
+        'initialize',
+        {
+          processId: process.pid,
+          clientInfo: { name: 'FreeCode', version: VERSION },
+          locale: 'en',
+          rootPath: root,
+          rootUri: fileUri(root),
+          workspaceFolders: [{ uri: fileUri(root), name: path.basename(root) || root }],
+          initializationOptions: this.opts.launch.initializationOptions,
+          capabilities: CLIENT_CAPABILITIES,
+          trace: 'off',
+        },
+        timeoutMs,
+      );
+    } catch (e) {
+      // A server that refused or never answered initialize is of no use: stop it and keep the reason.
+      if (this.status !== 'exited') {
+        this.error = e instanceof RequestTimeoutError ? `did not finish starting within ${Math.round(timeoutMs / 1000)}s` : `failed to start: ${(e as Error).message.replace(`${label}: `, '')}`;
+        this.kill();
+      }
+      throw e;
+    }
     this.capabilities = init?.capabilities ?? {};
     this.serverName = init?.serverInfo?.name;
     this.notify('initialized', {});
-    if (this.status === 'starting') this.status = 'ready';
+    if (this.status !== 'starting') throw new ServerExitedError(this.describeExit());
+    this.status = 'ready';
     debug('lsp', `${label} ready`);
   }
 
