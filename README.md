@@ -11,12 +11,12 @@
   - On rate limits, used-up quotas, invalid keys, context overflow or server errors, it retries on the next model and remembers each cooldown.
   - Models that don't support tool calling get a text-based tool protocol instead.
   - Per-minute request and token limits are paced so you hit fewer 429s.
-- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, CodeSearch, Browser, Desktop, REPL, Debugger, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
+- **Real coding tools:** Read, Write, Edit, MultiEdit, Bash (with background jobs), Glob, Grep, LS, WebFetch, WebSearch, CodeSearch, LSP, Browser, Desktop, REPL, Debugger, TodoWrite, sub-agents (Task), AskUserQuestion, Skill and plan mode.
 - **It looks at what it builds.** The Browser tool opens your page or dev server in headless Edge or Chrome and reports what a person would notice: console errors, failed requests, sideways overflow, cut-off text, overlapping elements, low contrast, tiny click targets, unlabeled fields and broken images, plus phone and tablet widths and a log of the page's network requests. Models that can see images also get the screenshot. While a page is open, every UI edit reloads it and the edit result says what broke.
 - **Sees desktop apps too (Windows).** The Desktop tool screenshots a running app window (WinForms, WPF, WinUI, Electron, games), reads its controls through UI Automation (type, name, position, size, current value) and flags controls outside the window, overlapping or tiny ones. It can click buttons and type into fields to test the app, after asking you.
 - **Knows all your projects.** A local code index (on by default for the open project; add folders like `Desktop\Projects` in Settings → Code index) gives the agent CodeSearch: search by meaning-ish keywords, definitions and references, which project imports which, dependency versions, scripts, configs, missing `.env` keys, git history and likely unused code. 10,000 files index in about 8 seconds and a search takes about 12 ms. Nothing leaves your computer.
 - **Experiments and debugging like a person would.** The REPL tool keeps a Python or Node session alive between steps (variables survive, top-level await works), so the agent can poke at data or an API without writing throwaway scripts. The Debugger tool drives pdb and node inspect: set breakpoints, step, and print variables of a failing program.
-- **Catches broken edits at once.** After each edit, JSON, JavaScript, Python and TypeScript files are syntax checked and errors go straight back to the model.
+- **Catches broken edits at once.** After each edit, JSON, JavaScript, Python and TypeScript files are syntax checked, and the installed language server (TypeScript, Python, Rust, Go, C/C++, C# and more) reports the type errors the edit caused, also in other files that use the changed code. Both go straight back to the model. The LSP tool asks the same servers for definitions, references, types, renames across files and diagnostics. When a server is missing, the LSP tool names the command that installs it.
 - **Knows your machine.** The prompt lists the installed tools and versions (node, python, dotnet, java, go, rustc, gcc, git, docker) and what is missing.
 - **One-command workflows:** `/tdd`, `/security`, `/pr`, `/onboard`, `/deps`, `/cleanup`, `/fuzz`, `/bench`, `/audit-ui`, `/ci-fix`, `/env` and `/port`. `/commit` runs the tests before committing.
 - **Clickable references.** `file:line` in answers, stack traces and compiler errors opens in VS Code, Cursor, Windsurf or Zed at that line.
@@ -177,6 +177,7 @@ Useful settings:
 - `hooks`
 - `mcpServers`
 - `bashTimeoutMs`
+- `lsp.enabled`: language servers on or off; `lsp.servers`: per language, another command, e.g. `{"python": {"command": "pylsp"}}` (global settings only)
 
 Hooks, MCP servers, environment variables and allow rules in a project's settings only take effect after you trust that folder.
 
