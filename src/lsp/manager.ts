@@ -46,6 +46,18 @@ interface Failure {
   crashes: number[];
 }
 
+/** An edited file whose new content the server has, with what it reported before. */
+interface SentEdit {
+  client: LspClient;
+  def: ServerDef;
+  root: string;
+  file: string;
+  before?: { items: Diagnostic[]; text: string };
+  othersBefore: Map<string, Diagnostic[]>;
+  since: number;
+  synced: { doc: Doc; changed: boolean };
+}
+
 export type Acquired =
   | { ok: true; client: LspClient; def: ServerDef; root: string }
   | { ok: false; reason: 'disabled' | 'unsupported' | 'missing' | 'bad-override' | 'failed' | 'starting'; message: string };
@@ -249,19 +261,24 @@ export class LspManager {
       if (f && defForFile(f, this.defs)) last.set(pathKey(f), i);
     });
     const edited = new Set(last.keys());
+    const failed = (e: unknown) => {
+      debug('lsp', 'diagnostics after edit failed', e);
+      return null;
+    };
+    // Every changed file reaches its server before any is checked: the files of a rename refer to each other.
+    const sent = await Promise.all([...last.values()].map((i) => this.sendEdit(files[i]!, projectRoot, deadline, signal).then((s) => (s ? { ...s, i } : null), failed)));
+    // Errors in other files are told once per server, not with every file of the change.
+    const told = new Set<LspClient>();
     await Promise.all(
-      [...last.values()].map(async (i) => {
-        try {
-          out[i] = await this.editReport(files[i]!, projectRoot, deadline, edited, signal);
-        } catch (e) {
-          debug('lsp', 'diagnostics after edit failed', e);
-        }
+      sent.map(async (s) => {
+        if (s) out[s.i] = await this.checkEdit(s, projectRoot, deadline, edited, told, signal).catch(failed);
       }),
     );
     return out;
   }
 
-  private async editReport(file: string, projectRoot: string, deadline: number, edited: Set<string>, signal?: AbortSignal): Promise<string | null> {
+  /** Sends the new content of an edited file to its server, noting what the server knew before. */
+  private async sendEdit(file: string, projectRoot: string, deadline: number, signal?: AbortSignal): Promise<SentEdit | null> {
     const acq = await this.acquire(file, projectRoot, { waitMs: deadline - Date.now(), signal });
     if (!acq.ok) return null;
     const { client, def, root } = acq;
@@ -271,13 +288,21 @@ export class LspManager {
     const othersBefore = new Map(client.allDiagnostics().map((e) => [uriKey(e.uri), e.items]));
     const since = client.diagnosticsSeq;
     const synced = await client.sync(file, { save: true });
-    if (!synced) return null;
+    return synced ? { client, def, root, file, before, othersBefore, since, synced } : null;
+  }
+
+  private async checkEdit(s: SentEdit, projectRoot: string, deadline: number, edited: Set<string>, told: Set<LspClient>, signal?: AbortSignal): Promise<string | null> {
+    const { client, def, root, file, synced } = s;
     // Content the server already had (a Write of the same text) gets no new push: the last one stands.
     const known = !synced.changed && !client.pullsDiagnostics ? client.lastDiagnostics(file) : undefined;
-    const items = known ?? (await client.diagnosticsFor(synced.doc, since, Math.max(0, deadline - Date.now()), signal));
+    const items = known ?? (await client.diagnosticsFor(synced.doc, s.since, Math.max(0, deadline - Date.now()), signal));
     if (!items || def.unreliable?.(items, root)) return null;
-    const own = editReport({ rel: displayPath(file, projectRoot), label: client.label, items, text: synced.doc.text, before });
-    const others = await this.newErrorsElsewhere(client, since, othersBefore, edited, projectRoot, deadline, signal);
+    const own = editReport({ rel: displayPath(file, projectRoot), label: client.label, items, text: synced.doc.text, before: s.before });
+    let others: string | null = null;
+    if (!told.has(client)) {
+      told.add(client);
+      others = await this.newErrorsElsewhere(client, s.since, s.othersBefore, edited, projectRoot, deadline, signal);
+    }
     return [own, others].filter(Boolean).join('\n') || null;
   }
 

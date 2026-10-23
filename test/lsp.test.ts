@@ -313,6 +313,14 @@ test('diagnostics after an edit: pulled and unversioned diagnostics, new errors 
   assert.deepEqual(await m.afterEdit([path.join(dir, 'main.fk'), lib], dir), [null, null]);
   writeFileSync(lib, 'def welcome\n');
   assert.deepEqual(await m.afterEdit([lib], dir), ['New errors in other files:\n  main.fk:1:5 Unknown name greet [E2]']);
+  // Two edits in one step that break a third file: its errors are told once.
+  const two = project({ 'a.fk': 'def one\n', 'b.fk': 'def two\n', 'c.fk': 'use one\nuse two\n' });
+  const [a, b, c] = ['a.fk', 'b.fk', 'c.fk'].map((f) => path.join(two, f));
+  assert.deepEqual(await m.afterEdit([c!], two), [null]);
+  writeFileSync(a!, 'def uno\n');
+  writeFileSync(b!, 'def dos\n');
+  const reports = await m.afterEdit([a!, b!], two);
+  assert.deepEqual(reports.filter(Boolean), ['New errors in other files:\n  c.fk:1:5 Unknown name one [E2]\n  c.fk:2:5 Unknown name two [E2]']);
 });
 
 test('diagnostics after an edit never hold up the edit: missing, silent, slow and crashing servers', async () => {
@@ -445,6 +453,15 @@ test('LSP tool: rename asks like Edit, changes every file and can be undone', as
   assert.match(sub.error?.content ?? '', /^Sub-agents can use LSP to read code/);
   const word = await LspTool.prepare({ action: 'rename', file_path: 'main.fk', symbol: 'again', new_name: 'x' }, ctx);
   assert.equal(word.error?.content, 'fakeLspServer cannot rename again here (not a symbol it can rename).');
+});
+
+test('LSP tool: after a rename every changed file is sent before any is checked', async () => {
+  // With pulled diagnostics, app.fk (sent first) would be checked against the old lib.fk.
+  applyLspSettings({ servers: { fake: fake({ pull: true }) } });
+  const dir = project({ 'app.fk': 'use greet\n', 'lib.fk': 'def greet\n' });
+  const prep = await LspTool.prepare({ action: 'rename', file_path: 'lib.fk', symbol: 'greet', new_name: 'welcome' }, toolContext(dir).ctx);
+  assert.equal(prep.error, undefined, prep.error?.content);
+  assert.equal((await prep.execute()).content, 'Renamed greet to welcome: 2 changes in 2 files.\n  app.fk: 1 change (line 1)\n  lib.fk: 1 change (line 1)');
 });
 
 test('LSP tool: without a language server it names the one to install and the command', async () => {
