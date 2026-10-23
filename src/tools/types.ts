@@ -143,6 +143,8 @@ export interface ToolServices {
   runSubagent?: (req: SubagentRequest) => Promise<string>;
   /** Condense a long text with a cheap model (WebFetch with a prompt). */
   summarize?: (text: string, instruction: string, signal: AbortSignal) => Promise<string>;
+  /** What the permission rules and mode decide for a request, without asking anyone. */
+  permit?: (req: PermissionRequest) => { action: 'allow' | 'deny' | 'ask'; reason?: string };
 }
 
 export interface ToolContext {

@@ -1,15 +1,17 @@
 // LSP tool: asks the project's language servers about code. Definition, references, hover (types),
 // rename (edits files), symbols (outline or project search) and diagnostics (a file or the project).
+// A server that runs code from the project (C#, TypeScript with only the project's own TypeScript)
+// starts only after the user allowed it: the first call that needs it asks.
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
-import type { PreparedCall, Tool, ToolContext, ToolResult } from './types.js';
+import type { PermissionRequest, PreparedCall, Tool, ToolContext, ToolResult } from './types.js';
 import { errorResult, fail, numParam, ok, strParam } from './types.js';
 import { isInProject, listFiles, resolvePath } from './listFiles.js';
 import { buildHunks, diffStats } from './diff.js';
 import { displayPath } from '../util/fs.js';
 import { escapeRegExp, truncate } from '../util/strings.js';
 import { isAbortError } from '../util/async.js';
-import { getLsp } from '../lsp/index.js';
+import { getLsp, notStartedMessage, type StartCheck } from '../lsp/index.js';
 import { LspError, MAX_SYNC_BYTES, RequestTimeoutError, ServerExitedError, type Doc, type LspClient } from '../lsp/client.js';
 import { applyTextEdits, editsByFile } from '../lsp/edits.js';
 import { fileDiagnosticsReport, hoverText, outline, plural, projectDiagnosticsReport, sourceLine, symbolKind } from '../lsp/format.js';
@@ -114,6 +116,11 @@ type Run<T> = { ok: true; value: T; client: LspClient } | { ok: false; result: T
 /** A mistake in the call (a name not in the file, a line out of range): told to the model as it is. */
 class UsageError extends Error {}
 
+/** Servers that run project code may start when the permission rules or mode allow it without asking. */
+function mayStart(ctx: ToolContext): StartCheck {
+  return (req) => ctx.services.permit?.(req).action === 'allow';
+}
+
 function unsyncable(file: string, ctx: ToolContext): string {
   return `${displayPath(file, ctx.session.cwd)} cannot be read, or it is larger than ${MAX_SYNC_BYTES / 1024 / 1024} MB (language servers do not get files that big).`;
 }
@@ -121,7 +128,7 @@ function unsyncable(file: string, ctx: ToolContext): string {
 /** Runs `fn` against the server for `file`; a server that crashes in the middle is started once more. */
 async function onServer<T>(file: string, ctx: ToolContext, fn: (client: LspClient) => Promise<T>): Promise<Run<T>> {
   for (let attempt = 0; ; attempt++) {
-    const acq = await getLsp().acquire(file, ctx.projectRoot, { waitMs: STARTUP_WAIT_MS, signal: ctx.signal });
+    const acq = await getLsp().acquire(file, ctx.projectRoot, { waitMs: STARTUP_WAIT_MS, signal: ctx.signal, mayStart: mayStart(ctx) });
     if (ctx.signal.aborted) return { ok: false, result: fail('Interrupted by the user.') };
     if (!acq.ok) return { ok: false, result: fail(acq.message) };
     try {
@@ -265,7 +272,7 @@ async function symbols(file: string | null, input: Record<string, unknown>, ctx:
   const targets = file ? [file] : getLsp().running(ctx.projectRoot).length ? [] : [await representativeFile(ctx.projectRoot)].filter((f): f is string => !!f);
   const clients = new Map<LspClient, string | null>();
   for (const t of targets) {
-    const acq = await getLsp().acquire(t, ctx.projectRoot, { waitMs: STARTUP_WAIT_MS, signal: ctx.signal });
+    const acq = await getLsp().acquire(t, ctx.projectRoot, { waitMs: STARTUP_WAIT_MS, signal: ctx.signal, mayStart: mayStart(ctx) });
     if (!acq.ok) return fail(acq.message);
     clients.set(acq.client, t);
   }
@@ -306,7 +313,7 @@ async function symbols(file: string | null, input: Record<string, unknown>, ctx:
 async function diagnostics(file: string | null, ctx: ToolContext): Promise<ToolResult> {
   if (!file) {
     const changed = [...ctx.files.sessionChanges().keys()];
-    const res = await getLsp().projectDiagnostics(ctx.projectRoot, { signal: ctx.signal, prefer: changed, timeoutMs: 45_000 });
+    const res = await getLsp().projectDiagnostics(ctx.projectRoot, { signal: ctx.signal, prefer: changed, timeoutMs: 45_000, mayStart: mayStart(ctx) });
     if (ctx.signal.aborted) return fail('Interrupted by the user.');
     if (!res.servers.length) return fail(res.notes.length ? res.notes.join('\n') : 'No files of a language with a language server were found in this project.');
     const report = projectDiagnosticsReport(res.files.map((f) => ({ rel: displayPath(f.file, ctx.session.cwd), items: f.items })));
@@ -342,11 +349,18 @@ interface FileChange {
   lines: number[];
 }
 
-async function prepareRename(file: string, input: Record<string, unknown>, ctx: ToolContext): Promise<PreparedCall> {
+const newNameParam = (input: Record<string, unknown>) => strParam(input, 'new_name', 'newName', 'to', 'new', 'rename_to')?.trim() || undefined;
+
+/** Renames that are refused before any server is asked. */
+function renameRefusal(input: Record<string, unknown>, ctx: ToolContext): PreparedCall | null {
   if (ctx.depth > 0) return errorResult('Sub-agents can use LSP to read code (definition, references, hover, symbols, diagnostics) but not to rename. Report what should be renamed instead.');
   if (ctx.session.permissionMode === 'plan') return errorResult('Plan mode is read-only: rename after the plan is approved.');
-  const newName = strParam(input, 'new_name', 'newName', 'to', 'new', 'rename_to')?.trim();
-  if (!newName) return errorResult('Missing required parameter for rename: new_name');
+  if (!newNameParam(input)) return errorResult('Missing required parameter for rename: new_name');
+  return null;
+}
+
+async function prepareRename(file: string, input: Record<string, unknown>, ctx: ToolContext): Promise<PreparedCall> {
+  const newName = newNameParam(input)!;
   const run = await onServer(file, ctx, async (c) => {
     const at = await openAt(c, file, input, ctx);
     const canPrepare = !!(c.capabilities.renameProvider && typeof c.capabilities.renameProvider === 'object' && (c.capabilities.renameProvider as { prepareProvider?: boolean }).prepareProvider);
@@ -411,7 +425,7 @@ async function prepareRename(file: string, input: Record<string, unknown>, ctx: 
       }
       const list = changes.map((c) => `  ${rel(c.file)}: ${plural(c.count, 'change')} (line${c.lines.length === 1 ? '' : 's'} ${truncate(c.lines.join(', '), 80)})`);
       // The server gets the new contents and reports what broke.
-      const reports = (await getLsp().afterEdit(changes.map((c) => c.file), ctx.projectRoot, ctx.signal).catch(() => [])).filter(Boolean);
+      const reports = (await getLsp().afterEdit(changes.map((c) => c.file), ctx.projectRoot, ctx.signal, mayStart(ctx)).catch(() => [])).filter(Boolean);
       const text = [`Renamed ${name} to ${newName}: ${plural(total, 'change')} in ${plural(changes.length, 'file')}.`, ...list, ...(reports.length ? ['', ...reports] : [])].join('\n');
       return ok(text, preview ?? { kind: 'summary', text: `Renamed ${name} to ${newName} in ${plural(changes.length, 'file')}` });
     },
@@ -464,22 +478,62 @@ export const LspTool: Tool = {
       if (!st) return errorResult(`File not found: ${file}`);
       if (st.isDirectory()) return errorResult(`${file} is a folder. Give a source file.`);
     }
-    if (action === 'rename') return prepareRename(file!, input, ctx);
-    return {
-      execute: async () => {
-        switch (action) {
-          case 'definition':
-            return definition(file!, input, ctx);
-          case 'references':
-            return references(file!, input, ctx);
-          case 'hover':
-            return hover(file!, input, ctx);
-          case 'symbols':
-            return symbols(file, input, ctx);
-          case 'diagnostics':
-            return diagnostics(file, ctx);
-        }
-      },
+    if (action === 'rename') {
+      const refused = renameRefusal(input, ctx);
+      if (refused) return refused;
+    }
+    const start = await neededStart(action, file, input, ctx);
+    if (action === 'rename') {
+      if (!start) return prepareRename(file!, input, ctx);
+      // A rename is reviewed before it is applied, which takes a call of its own once the server runs.
+      return askToStart(start, ctx, async () => {
+        getLsp().warmUp(file!, ctx.projectRoot);
+        return ok(`Allowed ${start.ruleLabel} for this project. Run the rename again to review the change and apply it.`, { kind: 'summary', text: 'Language server allowed' });
+      });
+    }
+    const run = async (): Promise<ToolResult> => {
+      switch (action) {
+        case 'definition':
+          return definition(file!, input, ctx);
+        case 'references':
+          return references(file!, input, ctx);
+        case 'hover':
+          return hover(file!, input, ctx);
+        case 'symbols':
+          return symbols(file, input, ctx);
+        case 'diagnostics':
+          return diagnostics(file, ctx);
+      }
     };
+    return start ? askToStart(start, ctx, run) : { execute: run };
   },
 };
+
+/** The permission a call still needs to start a server that runs code from the project, or null. */
+async function neededStart(action: Action, file: string | null, input: Record<string, unknown>, ctx: ToolContext): Promise<PermissionRequest | null> {
+  const lsp = getLsp();
+  if (file) return lsp.startRequest(file, ctx.projectRoot);
+  if (action === 'diagnostics') return lsp.projectStartRequest(ctx.projectRoot);
+  if (action === 'symbols' && strParam(input, 'query', 'q', 'search', 'pattern')?.trim() && !lsp.running(ctx.projectRoot).length) {
+    const rep = await representativeFile(ctx.projectRoot);
+    return rep ? lsp.startRequest(rep, ctx.projectRoot) : null;
+  }
+  return null;
+}
+
+/**
+ * The call waits for the user's approval to start the server (the rule LSP(<language>) or bypass mode
+ * give it without asking). When the rules say no outright (plan mode, nobody to ask, a deny rule), the
+ * answer says how to allow it instead.
+ */
+function askToStart(req: PermissionRequest, ctx: ToolContext, run: () => Promise<ToolResult>): PreparedCall {
+  const decided = ctx.services.permit?.(req);
+  if (decided?.action === 'deny') return errorResult(`${notStartedMessage(req)} Right now: ${decided.reason ?? 'not allowed'}.`);
+  return {
+    permission: req,
+    execute: async () => {
+      getLsp().approve(ctx.projectRoot, req.specifier!);
+      return run();
+    },
+  };
+}

@@ -403,6 +403,11 @@ export class Agent {
 
   // ------------------------------------------------------------------ tools
 
+  /** The permission rules and mode applied to a request, without asking anyone. */
+  private permit(req: PermissionRequest): ReturnType<typeof decide> {
+    return decide(req, { ...this.opts.permissions, mode: this.opts.session.permissionMode });
+  }
+
   private toolContext(signal: AbortSignal, toolCallId: string): ToolContext {
     const services: ToolServices = {
       progress: (text) => this.emit({ type: 'tool_progress', id: toolCallId, text }),
@@ -410,6 +415,7 @@ export class Agent {
       approvePlan: this.opts.ui.approvePlan,
       runSubagent: this.depth === 0 ? (req) => this.runSubagent(req.description, req.prompt, req.agentType, req.signal) : undefined,
       summarize: (text, instruction, sig) => this.summarizeText(text, instruction, sig),
+      permit: (req) => this.permit(req),
     };
     return {
       projectRoot: this.opts.projectRoot,
@@ -455,8 +461,10 @@ export class Agent {
       const paths = edits.map((c) => strParam(parseToolArguments(c.arguments).value, 'file_path', 'path', 'filePath') ?? '');
       const files = paths.map((p) => (p ? resolvePath(p, this.opts.session.cwd) : ''));
       // A broken edit is cheapest to fix right away, while the model still has the change in mind.
-      // The language server check runs alongside; a missing or slow server just means no report.
-      const [checks, diagnostics] = await Promise.all([Promise.all(files.map((f) => (f ? checkSyntax(f, this.opts.projectRoot) : null))), diagnosticsAfterEdit(files, this.opts.projectRoot, signal)]);
+      // The language server check runs alongside; a missing or slow server just means no report, and one
+      // that would run the project's code is only started when the permission rules allow it.
+      const mayStart = (req: PermissionRequest) => this.permit(req).action === 'allow';
+      const [checks, diagnostics] = await Promise.all([Promise.all(files.map((f) => (f ? checkSyntax(f, this.opts.projectRoot) : null))), diagnosticsAfterEdit(files, this.opts.projectRoot, signal, mayStart)]);
       checks.forEach((problem, i) => {
         const r = results.get(edits[i]!.id)!;
         if (problem) results.set(edits[i]!.id, { ...r, content: `${r.content}\n\nSyntax check failed after this edit:\n${problem}\nFix this before doing anything else.` });

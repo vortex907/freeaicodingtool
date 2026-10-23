@@ -4,9 +4,11 @@
 //   diagnosticsAfterEdit(...)     short reports for files the agent just changed (never throws)
 //   warmUpLanguageServer(...)     starts the server for a file the agent read
 //   stopLanguageServers()         shuts every server down (app exit, project switch)
-import { LspManager, type LspSettings } from './manager.js';
+// Servers that run code from the project (C#, TypeScript with only the project's own TypeScript) start
+// only once the user allowed them: `mayStart` asks the permission rules, the LSP tool asks the user.
+import { LspManager, type LspSettings, type StartCheck } from './manager.js';
 
-export { LspManager, DEFAULT_DIAGNOSTICS_TIMEOUT_MS, type LspSettings, type Acquired } from './manager.js';
+export { LspManager, DEFAULT_DIAGNOSTICS_TIMEOUT_MS, notStartedMessage, startPermission, type LspSettings, type Acquired, type StartCheck } from './manager.js';
 
 let shared: LspManager | null = null;
 
@@ -27,17 +29,17 @@ export function isLspEnabled(): boolean {
   return getLsp().enabled;
 }
 
-export async function diagnosticsAfterEdit(files: string[], projectRoot: string, signal?: AbortSignal): Promise<(string | null)[]> {
+export async function diagnosticsAfterEdit(files: string[], projectRoot: string, signal?: AbortSignal, mayStart?: StartCheck): Promise<(string | null)[]> {
   try {
-    return await getLsp().afterEdit(files, projectRoot, signal);
+    return await getLsp().afterEdit(files, projectRoot, signal, mayStart);
   } catch {
     return files.map(() => null);
   }
 }
 
-export function warmUpLanguageServer(file: string, projectRoot: string): void {
+export function warmUpLanguageServer(file: string, projectRoot: string, mayStart?: StartCheck): void {
   try {
-    getLsp().warmUp(file, projectRoot);
+    getLsp().warmUp(file, projectRoot, mayStart);
   } catch {
     // a language server must never get in the way of reading a file
   }

@@ -1,7 +1,8 @@
 // Starts language servers when they are first needed (one per language and project folder), restarts
 // them after a crash, stops idle ones, and turns their diagnostics into short reports for the agent.
+// A server that runs code from the project starts only once the user allowed it for that project.
 import * as path from 'node:path';
-import { LspClient, type Doc } from './client.js';
+import { LspClient, type Doc, type ServerLaunch } from './client.js';
 import { defForFile, findRoot, languageIdFor, resolveServer, serverDefs, canonicalServerId, type Resolved, type ServerDef, type ServerOverride } from './servers.js';
 import { editReport, isError, otherFilesReport } from './format.js';
 import { pathKey, uriKey, uriToPath, type Diagnostic } from './protocol.js';
@@ -9,6 +10,7 @@ import { listFiles, sortByMtime } from '../tools/listFiles.js';
 import { displayPath, isInside } from '../util/fs.js';
 import { mapLimit } from '../util/async.js';
 import { debug } from '../util/log.js';
+import type { PermissionRequest } from '../tools/types.js';
 
 export interface LspSettings {
   /** Language servers on (default true). */
@@ -62,7 +64,35 @@ interface SentEdit {
 
 export type Acquired =
   | { ok: true; client: LspClient; def: ServerDef; root: string }
-  | { ok: false; reason: 'disabled' | 'unsupported' | 'missing' | 'bad-override' | 'failed' | 'starting'; message: string };
+  | { ok: false; reason: 'disabled' | 'unsupported' | 'missing' | 'bad-override' | 'failed' | 'starting'; message: string }
+  /** The server would run code from the project and the user has not allowed that (request asks them). */
+  | { ok: false; reason: 'needs-approval'; message: string; request: PermissionRequest };
+
+/** Whether the permission rules and mode allow a request without asking (a server start). */
+export type StartCheck = (req: PermissionRequest) => boolean;
+
+/** The permission to start a server that runs code from the project; the rule LSP(<language>) allows it. */
+export function startPermission(def: ServerDef, launch: ServerLaunch): PermissionRequest {
+  return {
+    tool: 'LSP',
+    category: 'execute',
+    title: `Start the ${def.name} language server for this project`,
+    subject: `${launch.label} ${launch.runsProjectCode}.`,
+    description: 'Allow it only if you trust the code in this project.',
+    specifier: def.id,
+    ruleSuggestion: `LSP(${def.id})`,
+    ruleLabel: `the ${def.name} language server`,
+  };
+}
+
+/** Why a server was not started and how to allow it, for the model and the user. */
+export function notStartedMessage(req: PermissionRequest): string {
+  const rule = req.ruleSuggestion ?? 'LSP';
+  const what = req.ruleLabel ?? 'The language server';
+  return `${what[0]!.toUpperCase()}${what.slice(1)} was not started: ${req.subject} It starts once you allow it for this project: answer yes when FreeCode asks, or add the permission rule ${rule} (Settings → Permissions, permissions.allow in .freecode/settings.json, or --allowedTools "${rule}").`;
+}
+
+const approvalKey = (projectRoot: string, serverId: string) => `${pathKey(projectRoot)}|${canonicalServerId(serverId)}`;
 
 export interface ProjectDiagnostics {
   files: { file: string; items: Diagnostic[] }[];
@@ -113,6 +143,8 @@ export class LspManager {
   private entries = new Map<string, Entry>();
   private failures = new Map<string, Failure>();
   private missing = new Map<string, { at: number; resolved: Resolved }>();
+  /** Project and language pairs whose servers the user allowed to run project code (for this run). */
+  private approved = new Set<string>();
 
   /** Applies the "lsp" settings. Running servers stop when turned off or when their setup changed. */
   configure(cfg: LspSettings | undefined): void {
@@ -136,9 +168,10 @@ export class LspManager {
 
   /**
    * The running server for `file`, started if needed. Waits at most `waitMs` for it to come up; a
-   * server that is still starting keeps starting in the background.
+   * server that is still starting keeps starting in the background. A server that runs code from the
+   * project starts only when the user allowed it before or `mayStart` (the permission rules) allows it.
    */
-  async acquire(file: string, projectRoot: string, opts: { waitMs?: number; signal?: AbortSignal } = {}): Promise<Acquired> {
+  async acquire(file: string, projectRoot: string, opts: { waitMs?: number; signal?: AbortSignal; mayStart?: StartCheck } = {}): Promise<Acquired> {
     if (!this.enabled) return { ok: false, reason: 'disabled', message: 'Language servers are turned off in the settings (lsp.enabled).' };
     const def = defForFile(file, this.defs);
     if (!def) return { ok: false, reason: 'unsupported', message: `FreeCode knows no language server for ${path.extname(file) || 'these'} files.` };
@@ -148,8 +181,13 @@ export class LspManager {
     if (!entry) {
       const failed = this.failures.get(key);
       if (failed && Date.now() < failed.until) return { ok: false, reason: 'failed', message: failed.message };
-      const resolved = this.resolve(def, root, key);
+      const resolved = this.resolve(def, root, key, projectRoot);
       if (!resolved.ok) return { ok: false, reason: resolved.reason, message: resolved.message };
+      if (resolved.launch.runsProjectCode && !this.approved.has(approvalKey(projectRoot, def.id))) {
+        const request = startPermission(def, resolved.launch);
+        if (!opts.mayStart?.(request)) return { ok: false, reason: 'needs-approval', message: notStartedMessage(request), request };
+        this.approve(projectRoot, def.id);
+      }
       entry = this.start(key, def, root, resolved.launch);
     }
     this.touch(entry);
@@ -159,14 +197,45 @@ export class LspManager {
     return { ok: false, reason: 'failed', message: this.failures.get(key)?.message ?? entry.client.describeExit() };
   }
 
-  private resolve(def: ServerDef, root: string, key: string): Resolved {
+  private resolve(def: ServerDef, root: string, key: string, projectRoot: string): Resolved {
     const m = this.missing.get(key);
     if (m && Date.now() - m.at < RECHECK_MISSING_MS) return m.resolved;
     // A second look skips cached PATH lookups: the user may have installed the server meanwhile.
-    const r = resolveServer(def, root, this.overrides[def.id], !!m);
+    const r = resolveServer(def, root, this.overrides[def.id], !!m, projectRoot);
     if (r.ok) this.missing.delete(key);
     else this.missing.set(key, { at: Date.now(), resolved: r });
     return r;
+  }
+
+  /** The permission the server for `file` still needs before it may start (it runs project code), or null. */
+  startRequest(file: string, projectRoot: string): PermissionRequest | null {
+    if (!this.enabled) return null;
+    const def = defForFile(file, this.defs);
+    if (!def || this.approved.has(approvalKey(projectRoot, def.id))) return null;
+    const root = findRoot(def, file, projectRoot);
+    const key = `${def.id}|${pathKey(root)}`;
+    if (this.entries.has(key)) return null;
+    const r = this.resolve(def, root, key, projectRoot);
+    return r.ok && r.launch.runsProjectCode ? startPermission(def, r.launch) : null;
+  }
+
+  /** The first such permission a check of the whole project needs (a language at a time). */
+  async projectStartRequest(projectRoot: string): Promise<PermissionRequest | null> {
+    if (!this.enabled) return null;
+    const seen = new Set<string>();
+    for (const rel of await listFiles(projectRoot).catch(() => [] as string[])) {
+      const def = defForFile(rel, this.defs);
+      if (!def || seen.has(def.id)) continue;
+      seen.add(def.id);
+      const req = this.startRequest(path.join(projectRoot, rel), projectRoot);
+      if (req) return req;
+    }
+    return null;
+  }
+
+  /** The user allowed this language's servers to run the project's code (until FreeCode exits). */
+  approve(projectRoot: string, serverId: string): void {
+    this.approved.add(approvalKey(projectRoot, serverId));
   }
 
   private start(key: string, def: ServerDef, root: string, launch: Extract<Resolved, { ok: true }>['launch']): Entry {
@@ -242,12 +311,13 @@ export class LspManager {
 
   /**
    * Starts the server for a file the agent read and opens the file in it, so the server is warm and
-   * knows the file's errors before the first edit. Never waits and never fails.
+   * knows the file's errors before the first edit. Never waits and never fails; a server that runs
+   * project code starts only when allowed (see acquire).
    */
-  warmUp(file: string, projectRoot: string): void {
+  warmUp(file: string, projectRoot: string, mayStart?: StartCheck): void {
     if (!this.enabled || !defForFile(file, this.defs)) return;
     void (async () => {
-      const acq = await this.acquire(file, projectRoot, { waitMs: 120_000 });
+      const acq = await this.acquire(file, projectRoot, { waitMs: 120_000, mayStart });
       if (!acq.ok) return;
       const since = acq.client.diagnosticsSeq;
       const r = await acq.client.sync(file);
@@ -259,9 +329,10 @@ export class LspManager {
   /**
    * Diagnostics reports for files the agent just changed (aligned with `files`; null = nothing to
    * say). A file changed by several calls gets one report, on its last call. Waits at most
-   * diagnosticsTimeoutMs in total and never throws.
+   * diagnosticsTimeoutMs in total and never throws. A server that runs project code is used only when
+   * allowed (see acquire); otherwise its files get no report.
    */
-  async afterEdit(files: string[], projectRoot: string, signal?: AbortSignal): Promise<(string | null)[]> {
+  async afterEdit(files: string[], projectRoot: string, signal?: AbortSignal, mayStart?: StartCheck): Promise<(string | null)[]> {
     const out: (string | null)[] = files.map(() => null);
     if (!this.enabled) return out;
     const deadline = Date.now() + this.diagnosticsTimeoutMs;
@@ -275,7 +346,7 @@ export class LspManager {
       return null;
     };
     // Every changed file reaches its server before any is checked: the files of a rename refer to each other.
-    const sent = await Promise.all([...last.values()].map((i) => this.sendEdit(files[i]!, projectRoot, deadline, signal).then((s) => (s ? { ...s, i } : null), failed)));
+    const sent = await Promise.all([...last.values()].map((i) => this.sendEdit(files[i]!, projectRoot, deadline, signal, mayStart).then((s) => (s ? { ...s, i } : null), failed)));
     // Errors in other files are told once per server, not with every file of the change.
     const told = new Set<LspClient>();
     await Promise.all(
@@ -287,8 +358,8 @@ export class LspManager {
   }
 
   /** Sends the new content of an edited file to its server, noting what the server knew before. */
-  private async sendEdit(file: string, projectRoot: string, deadline: number, signal?: AbortSignal): Promise<SentEdit | null> {
-    const acq = await this.acquire(file, projectRoot, { waitMs: deadline - Date.now(), signal });
+  private async sendEdit(file: string, projectRoot: string, deadline: number, signal?: AbortSignal, mayStart?: StartCheck): Promise<SentEdit | null> {
+    const acq = await this.acquire(file, projectRoot, { waitMs: deadline - Date.now(), signal, mayStart });
     if (!acq.ok) return null;
     const { client, def, root } = acq;
     const prev = client.doc(file);
@@ -348,7 +419,7 @@ export class LspManager {
    * (the ones changed in this session first, then the most recently modified), and everything the
    * servers report inside the project is collected.
    */
-  async projectDiagnostics(projectRoot: string, opts: { signal?: AbortSignal; timeoutMs?: number; prefer?: string[] } = {}): Promise<ProjectDiagnostics> {
+  async projectDiagnostics(projectRoot: string, opts: { signal?: AbortSignal; timeoutMs?: number; prefer?: string[]; mayStart?: StartCheck } = {}): Promise<ProjectDiagnostics> {
     const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
     const result: ProjectDiagnostics = { files: [], notes: [], checked: 0, limited: false, servers: [] };
     if (!this.enabled) {
@@ -380,7 +451,7 @@ export class LspManager {
           byRoot.set(root, [...(byRoot.get(root) ?? []), f]);
         }
         for (const group of byRoot.values()) {
-          const acq = await this.acquire(group[0]!, projectRoot, { waitMs: Math.max(0, deadline - Date.now()), signal: opts.signal });
+          const acq = await this.acquire(group[0]!, projectRoot, { waitMs: Math.max(0, deadline - Date.now()), signal: opts.signal, mayStart: opts.mayStart });
           if (!acq.ok) {
             if (acq.reason !== 'unsupported' && !result.notes.includes(acq.message)) result.notes.push(acq.message);
             continue;

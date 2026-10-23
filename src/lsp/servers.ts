@@ -1,5 +1,6 @@
 // Which language server handles which files, how to find it on this machine, which folder it works
-// in, and what to tell the user when it is not installed.
+// in, what to tell the user when it is not installed, and how to start it without running code from
+// the project (or that it cannot be, so it waits for the user's approval).
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -32,7 +33,15 @@ export interface ServerDef {
   /** Exact install command for the default server on this OS ('' for custom languages). */
   install: () => string;
   /** An installed server for this project folder, or null. `fresh` skips cached PATH lookups. */
-  find: (root: string, fresh: boolean) => ServerLaunch | null;
+  find: (root: string, fresh: boolean, projectRoot: string) => ServerLaunch | null;
+  /** initializationOptions that keep the server from running code from the project (settings go over them). */
+  initializationOptions?: unknown;
+  /** The section the server asks for with workspace/configuration; it gets the same options. */
+  configSection?: string;
+  /** Why this language's servers run code from the project: they start only once the user allows it. */
+  runsProjectCode?: string;
+  /** Points a found or configured server away from the project's code, or marks that it runs it. */
+  secure?: (launch: ServerLaunch, where: { root: string; projectRoot: string; fresh: boolean }) => void;
   /** See ClientOptions.quietMs, dedupes and indexesInBackground. */
   quietMs?: number;
   dedupes?: boolean;
@@ -109,6 +118,31 @@ function projectTypescript(root: string): TsInstall | null {
   }
 }
 
+/** The name in `dir`/package.json. */
+function packageName(dir: string): string | null {
+  try {
+    return (JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { name?: string }).name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The folder of the npm package `name` that the program `bin` was installed from. */
+function packageOf(bin: string, name: string): string | null {
+  try {
+    // npm links bin/<name> into the package on Linux and macOS.
+    for (let d = path.dirname(realpathSync(bin)); ; d = path.dirname(d)) {
+      if (packageName(d) === name) return d;
+      if (path.dirname(d) === d) break;
+    }
+  } catch {
+    // broken link
+  }
+  // Windows shims (<name>.cmd) sit next to node_modules.
+  const shim = path.join(path.dirname(bin), 'node_modules', name);
+  return packageName(shim) === name ? shim : null;
+}
+
 /** The TypeScript package that the `tsc` on PATH belongs to. */
 function typescriptOnPath(fresh: boolean): { ts: TsInstall; tsc: string } | null {
   const tsc = which('tsc', { fresh });
@@ -130,25 +164,56 @@ function typescriptOnPath(fresh: boolean): { ts: TsInstall; tsc: string } | null
 }
 
 /**
- * TypeScript 5 and 6 run in tsserver behind typescript-language-server; TypeScript 7 has its own
- * server (tsc --lsp). The project's own TypeScript version decides when both are installed.
+ * A TypeScript 5 or 6 (it has tsserver) outside the project for typescript-language-server `tls`: the
+ * one installed next to it, else the global one (`tsc` on PATH). The project's major version is preferred.
  */
-function typescriptServer(root: string, fresh: boolean): ServerLaunch | null {
+function outsideTypescript(tls: string, fresh: boolean, inProject: (p: string) => boolean, want?: number): TsInstall | null {
+  const pkg = packageOf(tls, 'typescript-language-server');
+  const next = pkg ? [path.join(pkg, 'node_modules', 'typescript'), path.join(path.dirname(pkg), 'typescript')].map(readTypescript) : [];
+  const usable = [...next, typescriptOnPath(fresh)?.ts ?? null].filter((t): t is TsInstall => !!t && t.major < 7 && isFile(path.join(t.dir, 'lib', 'tsserver.js')) && !inProject(t.dir));
+  return usable.find((t) => t.major === want) ?? usable[0] ?? null;
+}
+
+const PROJECT_TYPESCRIPT = "loads the project's own TypeScript (node_modules/typescript), which is code from the project";
+
+/**
+ * TypeScript 5 and 6 run in tsserver behind typescript-language-server; TypeScript 7 has its own
+ * server (tsc --lsp). The project's own TypeScript is never run: its version only decides between the
+ * two, and typescript-language-server gets a TypeScript from outside the project (see secureTypescript).
+ */
+function typescriptServer(root: string, fresh: boolean, projectRoot: string): ServerLaunch | null {
+  const inProject = (p: string) => insideProject(p, root, projectRoot);
   const local = projectTypescript(root);
-  const global = typescriptOnPath(fresh);
+  const onPath = typescriptOnPath(fresh);
+  // A tsc on PATH can be the project's own (node_modules/.bin on PATH).
+  const global = onPath && !inProject(onPath.ts.dir) ? onPath : null;
   const tls = which('typescript-language-server', { fresh });
   const tsgo = which('tsgo', { fresh });
   const native: ServerLaunch | null =
     global && global.ts.major >= 7 ? { command: global.tsc, args: ['--lsp', '--stdio'], label: `tsc ${global.ts.version}` } : tsgo ? { command: tsgo, args: ['--lsp', '--stdio'], label: 'tsgo' } : null;
   if (local && local.major >= 7 && native) return native;
-  const classicGlobal = global && global.ts.major < 7 ? global.ts : null;
-  if (tls && ((local && local.major < 7) || classicGlobal || !native)) {
-    // The project's TypeScript comes first; a global 5 or 6 is the fallback (a TypeScript 7 next to
-    // typescript-language-server has no tsserver and would make it fail).
-    const fallback = classicGlobal ? path.join(classicGlobal.dir, 'lib', 'tsserver.js') : undefined;
-    return { command: tls, args: ['--stdio'], label: 'typescript-language-server', initializationOptions: fallback && isFile(fallback) ? { tsserver: { fallbackPath: fallback } } : undefined };
-  }
+  // Without a TypeScript outside the project it would load the project's own: only when nothing else works
+  // (it then waits for the user's approval).
+  if (tls && (outsideTypescript(tls, fresh, inProject, local?.major) || (!native && local && local.major < 7))) return { command: tls, args: ['--stdio'], label: 'typescript-language-server' };
   return native;
+}
+
+/** Gives typescript-language-server a TypeScript from outside the project, or marks that it would load the project's. */
+function secureTypescript(launch: ServerLaunch, where: { root: string; projectRoot: string; fresh: boolean }): void {
+  // TypeScript 7 (tsc --lsp, tsgo) is a program of its own and runs no JavaScript from the project.
+  if (launch.args.includes('--lsp')) return;
+  const opts = launch.initializationOptions as { tsserver?: { path?: unknown } } | undefined;
+  // A tsserver chosen in the settings.
+  if (opts?.tsserver?.path) return;
+  const local = projectTypescript(where.root);
+  const ts = outsideTypescript(launch.command, where.fresh, (p) => insideProject(p, where.root, where.projectRoot), local?.major);
+  if (!ts) {
+    launch.runsProjectCode = PROJECT_TYPESCRIPT;
+    return;
+  }
+  launch.initializationOptions = mergeOptions(launch.initializationOptions, { tsserver: { path: path.join(ts.dir, 'lib', 'tsserver.js') } });
+  // Another major version can report errors the project's own TypeScript does not (TypeScript 6 changed defaults).
+  if (local && local.major !== ts.major) launch.label = `${launch.label} (TypeScript ${ts.version}, the project has ${local.version})`;
 }
 
 // ------------------------------------------------------------------ definitions
@@ -168,6 +233,7 @@ export const SERVER_DEFS: ServerDef[] = [
     rootMarkers: ['tsconfig.json', 'jsconfig.json', 'package.json'],
     install: () => 'npm install -g typescript-language-server typescript@6',
     find: typescriptServer,
+    secure: secureTypescript,
     // tsserver reports syntax errors first and type errors a little later.
     quietMs: 500,
     // typescript-language-server sends nothing for a file that had no errors and still has none.
@@ -198,6 +264,10 @@ export const SERVER_DEFS: ServerDef[] = [
     rootMarkers: ['Cargo.toml'],
     install: () => 'rustup component add rust-analyzer',
     find: (_root, fresh) => firstBin([{ name: 'rust-analyzer', args: [], dirs: cargoBin }], fresh),
+    // Build scripts and proc macros run code from the project, and so does cargo check on save (it
+    // builds them). Off unless the settings turn them on (lsp.servers.rust.initializationOptions).
+    initializationOptions: { cargo: { buildScripts: { enable: false } }, procMacro: { enable: false }, checkOnSave: false },
+    configSection: 'rust-analyzer',
     dedupes: true,
   },
   {
@@ -226,6 +296,8 @@ export const SERVER_DEFS: ServerDef[] = [
     extensions: { '.cs': 'csharp' },
     rootMarkers: ['*.sln', '*.slnx', '*.csproj'],
     install: () => 'dotnet tool install --global csharp-ls',
+    // csharp-ls and OmniSharp evaluate the project files with MSBuild, which runs the targets and tasks in them.
+    runsProjectCode: "loads the project's build files (MSBuild), which can run code",
     find: (_root, fresh) =>
       firstBin(
         [
@@ -306,9 +378,14 @@ export function languageIdFor(def: ServerDef, file: string): string {
 
 export type Resolved = { ok: true; launch: ServerLaunch } | { ok: false; reason: 'disabled' | 'missing' | 'bad-override'; message: string };
 
-/** The server to start for `def` in `root`: the settings override, else the first one installed. */
-export function resolveServer(def: ServerDef, root: string, override?: ServerOverride, fresh = false): Resolved {
+/**
+ * The server to start for `def` in `root`: the settings override, else the first one installed. It comes
+ * with the options that keep it from running code from the project; launch.runsProjectCode says when
+ * that cannot be avoided (the user has to allow it first).
+ */
+export function resolveServer(def: ServerDef, root: string, override?: ServerOverride, fresh = false, projectRoot = root): Resolved {
   if (override?.disabled) return { ok: false, reason: 'disabled', message: `The ${def.name} language server is turned off in the settings (lsp.servers.${def.id}.disabled).` };
+  let launch: ServerLaunch;
   if (override?.command) {
     const cmd = override.command.trim();
     // which() adds the Windows extensions itself, so "pylsp.exe" is looked up as "pylsp".
@@ -319,16 +396,56 @@ export function resolveServer(def: ServerDef, root: string, override?: ServerOve
     // "node server.js" is better known by its script than by the interpreter.
     const named = /^(node|python3?|py|java|dotnet|deno|bun)$/i.test(path.basename(cmd).replace(/\.(exe|cmd|bat)$/i, '')) && args[0] && !args[0].startsWith('-') ? args[0] : cmd;
     const label = path.basename(named).replace(/\.(exe|cmd|bat|js|mjs|cjs|py|jar|dll)$/i, '');
-    return { ok: true, launch: { command: found, args, label, initializationOptions: override.initializationOptions } };
+    launch = { command: found, args, label };
+  } else {
+    const found = def.find(root, fresh, projectRoot);
+    if (!found) {
+      const install = def.install();
+      return { ok: false, reason: 'missing', message: install ? `No ${def.name} language server is installed. Install it with: ${install}` : `No language server is configured for ${def.name}.` };
+    }
+    launch = found;
+    if (Array.isArray(override?.args)) launch.args = override.args.map(String);
   }
-  const launch = def.find(root, fresh);
-  if (!launch) {
-    const install = def.install();
-    return { ok: false, reason: 'missing', message: install ? `No ${def.name} language server is installed. Install it with: ${install}` : `No language server is configured for ${def.name}.` };
-  }
-  if (Array.isArray(override?.args)) launch.args = override.args.map(String);
-  if (override?.initializationOptions !== undefined) launch.initializationOptions = override.initializationOptions;
+  // The settings' options go over the language's own.
+  launch.initializationOptions = mergeOptions(def.initializationOptions, launch.initializationOptions, override?.initializationOptions);
+  def.secure?.(launch, { root, projectRoot, fresh });
+  if (def.runsProjectCode) launch.runsProjectCode = def.runsProjectCode;
+  // A server program inside the project folder is the project's code.
+  if (insideProject(launch.command, root, projectRoot)) launch.runsProjectCode = `is a program inside the project folder (${path.relative(projectRoot, path.resolve(launch.command))})`;
+  if (def.configSection) launch.settings = { [def.configSection]: launch.initializationOptions ?? {} };
   return { ok: true, launch };
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** Layers of initializationOptions merged key by key (later ones win); new objects, the inputs stay as they are. */
+export function mergeOptions(...layers: unknown[]): unknown {
+  let out: unknown = undefined;
+  for (const layer of layers) {
+    if (layer === undefined) continue;
+    if (!isPlainObject(layer)) {
+      out = layer;
+      continue;
+    }
+    const base: Record<string, unknown> = isPlainObject(out) ? { ...out } : {};
+    for (const [k, v] of Object.entries(layer)) base[k] = isPlainObject(v) ? mergeOptions(base[k], v) : v;
+    out = base;
+  }
+  return out;
+}
+
+/** True when `p` lies in the server's folder or the project (symbolic links followed). */
+function insideProject(p: string, root: string, projectRoot: string): boolean {
+  const real = (x: string) => {
+    try {
+      return realpathSync(x);
+    } catch {
+      return path.resolve(x);
+    }
+  };
+  return [root, projectRoot].some((r) => isInside(path.resolve(p), path.resolve(r)) || isInside(real(p), real(r)));
 }
 
 function hasMarker(dir: string, markers: string[]): boolean {

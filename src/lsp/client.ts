@@ -28,6 +28,10 @@ export interface ServerLaunch {
   /** Name shown to the user and the model, e.g. "typescript-language-server". */
   label: string;
   initializationOptions?: unknown;
+  /** Answers to workspace/configuration by section, e.g. { "rust-analyzer": {...} }. */
+  settings?: Record<string, unknown>;
+  /** Why starting it runs code from the project ("loads the project's build files ..."): it then waits for the user's approval. */
+  runsProjectCode?: string;
 }
 
 export interface ClientOptions {
@@ -310,8 +314,8 @@ export class LspClient {
     const p = (params ?? {}) as Record<string, unknown>;
     switch (method) {
       case 'workspace/configuration':
-        // null means "no settings": servers use their defaults.
-        result = Array.isArray(p.items) ? p.items.map(() => null) : [];
+        // Sections FreeCode sets get those settings; null means "no settings": the server's defaults.
+        result = Array.isArray(p.items) ? p.items.map((item) => this.setting((item as { section?: unknown } | null)?.section)) : [];
         break;
       case 'workspace/workspaceFolders':
         result = [{ uri: fileUri(this.opts.root), name: path.basename(this.opts.root) || this.opts.root }];
@@ -335,6 +339,19 @@ export class LspClient {
         if (!/^workspace\/\w+\/refresh$/.test(method)) error = { code: ErrorCodes.MethodNotFound, message: `FreeCode does not support ${method}` };
     }
     this.write(error ? { jsonrpc: '2.0', id, error } : { jsonrpc: '2.0', id, result });
+  }
+
+  /** The value of a settings section ("rust-analyzer", or a part like "rust-analyzer.cargo"), or null. */
+  private setting(section: unknown): unknown {
+    const all = this.opts.launch.settings;
+    if (typeof section !== 'string' || !all) return null;
+    for (const [key, value] of Object.entries(all)) {
+      if (section !== key && !section.startsWith(`${key}.`)) continue;
+      let v: unknown = value;
+      for (const part of section.slice(key.length + 1).split('.').filter(Boolean)) v = v && typeof v === 'object' ? (v as Record<string, unknown>)[part] : undefined;
+      return v ?? null;
+    }
+    return null;
   }
 
   private onNotification(method: string, params: unknown): void {

@@ -128,7 +128,7 @@ export const ReadTool: Tool = {
         ctx.files.recordRead(abs);
         ctx.files.recordView(abs, range, seq);
         // Files are read before they are edited: start the language server now so the edit is checked at once.
-        warmUpLanguageServer(abs, ctx.projectRoot);
+        warmUpLanguageServer(abs, ctx.projectRoot, (req) => ctx.services.permit?.(req).action === 'allow');
         if (!text.length) return ok(`<system-note>The file ${abs} exists but is empty.</system-note>`, { kind: 'summary', text: 'Read 0 lines (empty file)' });
         const allLines = text.split(/\r?\n/);
         if (allLines.length > 1 && allLines[allLines.length - 1] === '') allLines.pop();
