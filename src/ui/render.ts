@@ -104,7 +104,8 @@ export function renderToolResult(result: ToolResult, width: number): string[] {
         body = renderMarkdown(d.text, w);
         break;
       case 'image':
-        body = [c.dim(`Screenshot: ${d.summary ?? 'taken'}`), ...summarizeOutputLines(d.text ?? '', 6, w, true)];
+        // Screenshots come with a page report; images the agent read do not.
+        body = d.text === undefined ? [c.dim(`Image: ${d.summary ?? ''}`)] : [c.dim(`Screenshot: ${d.summary ?? 'taken'}`), ...summarizeOutputLines(d.text, 6, w, true)];
         break;
       case 'none':
         body = [];

@@ -6,6 +6,9 @@ import { boolParam, errorResult, fail, numParam, ok, strParam } from './types.js
 import { applyEdit, type EditOutcome } from './editMatch.js';
 import { buildHunks, diffStats } from './diff.js';
 import { isInProject, listFiles, resolvePath } from './listFiles.js';
+import { IMAGE_MEDIA_TYPES, imageSize, sniffImage } from './images.js';
+import { pageRangeText, readPdf } from './pdf.js';
+import { saveScreenshot } from '../browser/browser.js';
 import { displayPath, formatBytes, isBinaryBuffer } from '../util/fs.js';
 import { fuzzyScore } from '../util/strings.js';
 
@@ -13,8 +16,11 @@ const MAX_READ_BYTES = 20 * 1024 * 1024;
 const DEFAULT_READ_LINES = 2000;
 const MAX_LINE_CHARS = 2000;
 const MAX_READ_CHARS = 40_000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svgz', '.tiff']);
+/** Images Read sends to the model; the other image formats are refused. */
+const VIEWABLE_IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+const OTHER_IMAGE_EXT = new Set(['.bmp', '.ico', '.svgz', '.tif', '.tiff', '.heic', '.heif', '.avif', '.psd']);
 const BINARY_EXT = new Set(['.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.exe', '.dll', '.so', '.dylib', '.class', '.jar', '.pyc', '.o', '.a', '.wasm', '.mp3', '.mp4', '.mov', '.avi', '.mkv', '.wav', '.flac', '.ogg', '.woff', '.woff2', '.ttf', '.otf', '.eot', '.sqlite', '.db', '.bin']);
 
 function pathParam(input: Record<string, unknown>): string | undefined {
@@ -46,13 +52,14 @@ export function formatWithLineNumbers(lines: string[], startLine: number): strin
     .join('\n');
 }
 
-function renderNotebook(raw: string): string {
+/** A notebook as text: one "# %% [type] cell N" header per cell (with its id when it has one), then source and outputs. */
+export function renderNotebook(raw: string): string {
   try {
-    const nb = JSON.parse(raw) as { cells?: { cell_type: string; source: string | string[]; outputs?: { text?: string | string[]; data?: Record<string, unknown> }[] }[] };
+    const nb = JSON.parse(raw) as { cells?: { cell_type: string; id?: string; source: string | string[]; outputs?: { text?: string | string[]; data?: Record<string, unknown> }[] }[] };
     const out: string[] = [];
     (nb.cells ?? []).forEach((cell, i) => {
       const src = Array.isArray(cell.source) ? cell.source.join('') : cell.source;
-      out.push(`# %% [${cell.cell_type}] cell ${i + 1}`);
+      out.push(`# %% [${cell.cell_type}] cell ${i + 1}${typeof cell.id === 'string' && cell.id ? ` (id ${cell.id})` : ''}`);
       out.push(src);
       for (const o of cell.outputs ?? []) {
         const text = o.text ?? (o.data?.['text/plain'] as string | string[] | undefined);
@@ -66,14 +73,66 @@ function renderNotebook(raw: string): string {
   }
 }
 
+/** Images go to the model as an image part; models without vision only get the one-line description. */
+async function readImage(abs: string, size: number, ctx: ToolContext, data?: Buffer): Promise<ToolResult> {
+  const rel = displayPath(abs, ctx.session.cwd);
+  if (size > MAX_IMAGE_BYTES) return fail(`${rel} is ${formatBytes(size)}. Read sends images of up to 5 MB; make a smaller copy (scale it down or save it as JPEG) and read that.`);
+  const buf = data ?? (await fsp.readFile(abs));
+  const format = sniffImage(buf);
+  if (!format) return fail(`${rel} is not a valid PNG, JPEG, GIF or WebP image (its first bytes do not match any of them).`);
+  const dims = imageSize(buf, format);
+  const desc = `${format.toUpperCase()}${dims ? `, ${dims.width}x${dims.height}` : ''}, ${formatBytes(size)}`;
+  ctx.files.recordRead(abs);
+  let name: string | null = null;
+  try {
+    name = saveScreenshot(buf, format === 'jpeg' ? 'jpg' : format);
+  } catch {
+    // The copy only feeds the preview in the app.
+  }
+  return {
+    content: `Image ${rel} (${desc}). It is attached for models that can see images; a model without vision gets only this description.`,
+    images: [{ mediaType: IMAGE_MEDIA_TYPES[format], data: buf.toString('base64') }],
+    display: name ? { kind: 'image', name, summary: desc } : { kind: 'summary', text: `Image (${desc})` },
+  };
+}
+
+/** PDF text page by page (pdftotext when installed, else the built-in reader). */
+async function readPdfFile(abs: string, input: Record<string, unknown>, ctx: ToolContext, data?: Buffer): Promise<ToolResult> {
+  const rel = displayPath(abs, ctx.session.cwd);
+  const buf = data ?? (await fsp.readFile(abs));
+  const r = await readPdf(abs, buf, strParam(input, 'pages', 'page', 'page_range'), MAX_READ_CHARS);
+  if (typeof r === 'string') return fail(`${rel}: ${r}`);
+  ctx.files.recordRead(abs);
+  const count = `${r.total} page${r.total === 1 ? '' : 's'}`;
+  if (r.noText) {
+    const why =
+      r.noText === 'scanned'
+        ? 'the pages are scanned images without a text layer. Run OCR on it (for example ocrmypdf or tesseract) or ask the user for a text version.'
+        : r.noText === 'fonts'
+          ? 'its fonts have no Unicode mapping, so the built-in reader cannot decode the text. Install pdftotext (poppler-utils) and read it again.'
+          : 'the selected pages contain no text.';
+    return ok(`${rel} is a PDF with ${count}, but no text could be extracted: ${why}`, { kind: 'summary', text: r.noText === 'scanned' ? 'Scanned PDF without text' : 'No text found in the PDF' });
+  }
+  const shown = r.pages.map((p) => p.number);
+  const body = r.pages.map((p) => `--- Page ${p.number} ---\n${p.text || '(no text on this page)'}`).join('\n\n');
+  let note = '';
+  if (r.remaining.length) {
+    const next = pageRangeText(r.remaining.slice(0, Math.max(1, shown.length))).replace(/, /g, ',');
+    note = `\n\n<system-note>Showing page${shown.length === 1 ? '' : 's'} ${pageRangeText(shown)} of ${r.total} (output size limit). Use pages="${next}" to read more.</system-note>`;
+  }
+  const summary = shown.length === r.total ? `Read ${count} of PDF text` : `Read page${shown.length === 1 ? '' : 's'} ${pageRangeText(shown)} of ${r.total}`;
+  return ok(`PDF ${rel}, ${count}:\n\n${body}${note}`, { kind: 'summary', text: summary });
+}
+
 export const ReadTool: Tool = {
   name: 'Read',
   category: 'read',
   parallelSafe: true,
   planSafe: true,
   description:
-    'Read a text file from the local filesystem. Returns lines prefixed with line numbers (like `cat -n`); the prefix is NOT part of the file. ' +
+    'Read a file from the local filesystem. Text files come back with lines prefixed with line numbers (like `cat -n`); the prefix is NOT part of the file. ' +
     'By default reads up to 2000 lines from the start; use offset (1-based line) and limit for large files. ' +
+    'Images (PNG, JPEG, GIF, WebP up to 5 MB) are shown to models that can see images. PDFs return their text page by page; use pages (e.g. "1-5") for long ones. ' +
     'Always read a file before editing it. You can call Read on several files in parallel.',
   parameters: {
     type: 'object',
@@ -81,6 +140,7 @@ export const ReadTool: Tool = {
       file_path: { type: 'string', description: 'Path of the file (absolute or relative to the working directory)' },
       offset: { type: 'number', description: 'Line number to start reading from (1-based). Optional.' },
       limit: { type: 'number', description: 'Maximum number of lines to read. Optional.' },
+      pages: { type: 'string', description: 'PDF files only: pages to read, e.g. "3", "1-5" or "2,4-6". Optional.' },
     },
     required: ['file_path'],
   },
@@ -88,7 +148,8 @@ export const ReadTool: Tool = {
     const p = pathParam(input) ?? '?';
     const abs = resolvePath(p, ctx.cwd);
     const off = numParam(input, 'offset');
-    return `Read(${displayPath(abs, ctx.cwd)}${off ? `:${off}` : ''})`;
+    const pages = strParam(input, 'pages', 'page');
+    return `Read(${displayPath(abs, ctx.cwd)}${off ? `:${off}` : ''}${pages ? `, pages ${pages}` : ''})`;
   },
   async prepare(input, ctx): Promise<PreparedCall> {
     const p = pathParam(input);
@@ -104,7 +165,9 @@ export const ReadTool: Tool = {
         }
         if (st.isDirectory()) return fail(`${abs} is a directory, not a file. Use LS or Glob to list its contents.`);
         const ext = path.extname(abs).toLowerCase();
-        if (IMAGE_EXT.has(ext)) return fail(`${abs} is an image (${formatBytes(st.size)}). FreeCode cannot show images to the model through the Read tool.`);
+        if (VIEWABLE_IMAGE_EXT.has(ext)) return readImage(abs, st.size, ctx);
+        if (OTHER_IMAGE_EXT.has(ext)) return fail(`${abs} is a ${ext.slice(1).toUpperCase()} image (${formatBytes(st.size)}). Read shows PNG, JPEG, GIF and WebP images; convert it to one of those first.`);
+        if (ext === '.pdf') return readPdfFile(abs, input, ctx);
         if (BINARY_EXT.has(ext)) return fail(`${abs} is a binary file (${formatBytes(st.size)}) and cannot be read as text.`);
         let offset = Math.max(1, Math.floor(numParam(input, 'offset', 'start_line', 'line') ?? 1));
         const limitRaw = numParam(input, 'limit', 'lines', 'num_lines');
@@ -121,7 +184,12 @@ export const ReadTool: Tool = {
           return ok(`<system-note>${abs} has not changed since you read these lines a few steps ago; that result is still above. Use it instead of reading again.</system-note>`, { kind: 'summary', text: 'Unchanged since the last read' });
         }
         const buf = await fsp.readFile(abs);
-        if (isBinaryBuffer(buf)) return fail(`${abs} appears to be a binary file and cannot be read as text.`);
+        if (isBinaryBuffer(buf)) {
+          // Images and PDFs with an unusual name still get read as what they are.
+          if (sniffImage(buf)) return readImage(abs, st.size, ctx, buf);
+          if (buf.subarray(0, 5).toString('latin1') === '%PDF-') return readPdfFile(abs, input, ctx, buf);
+          return fail(`${abs} appears to be a binary file and cannot be read as text.`);
+        }
         let text = buf.toString('utf8');
         if (ext === '.ipynb') text = renderNotebook(text);
         ctx.files.recordRead(abs);

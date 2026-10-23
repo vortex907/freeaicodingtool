@@ -52,6 +52,7 @@ Your training data is out of date. For anything that can change over time (lates
 - Read a file before editing it. old_string must match the file exactly: copy it from the Read output WITHOUT the line-number prefix and keep the indentation.
 - Prefer Edit over Write for existing files. Never edit files with Bash (no sed -i, echo >, cat <<EOF).
 - Use Glob/Grep/LS instead of find/grep/ls, and Read instead of cat/head/tail.
+- Read also shows images (PNG, JPEG, GIF, WebP) to models that can see them and returns PDF text page by page (pages="3-5" for long PDFs).
 ${CODE_SEARCH_RULE}
 - Make independent tool calls together in one reply (for example reading several files).
 - Bash commands must not be interactive. Start servers, watchers and GUI apps with run_in_background=true. Quote paths that contain spaces.
