@@ -5,7 +5,7 @@
 //         plan         - read-only: no edits or side-effecting commands at all
 //         bypassPermissions ("yolo") - everything runs without asking (catastrophic commands still ask)
 // Rules:  "Tool", "Tool(specifier)". Bash(npm test) exact, Bash(npm run:*) prefix, Edit(src/**) glob,
-//         WebFetch(domain:example.com), REPL(python), Debugger(node), mcp__server or mcp__server__tool.
+//         WebFetch(domain:example.com), REPL(python), Debugger(node), TestRun(pytest), mcp__server or mcp__server__tool.
 import * as path from 'node:path';
 import type { PermissionMode } from '../config/config.js';
 import type { PermissionRequest } from '../tools/types.js';
@@ -48,11 +48,13 @@ export function ruleMatches(rule: string, req: PermissionRequest, projectRoot: s
     r.tool === tool ||
     // Edit rules cover all file-modifying tools
     (r.tool === 'Edit' && (tool === 'Write' || tool === 'MultiEdit' || tool === 'NotebookEdit')) ||
+    // Bash rules also cover TestRun, which runs a command line too
+    (r.tool === 'Bash' && tool === 'TestRun') ||
     (r.tool.startsWith('mcp__') && tool.startsWith(r.tool + '__')) ||
     (r.tool.startsWith('mcp__') && tool === r.tool);
   if (!toolMatches) return false;
   if (!r.spec) return true;
-  if (tool === 'Bash') return req.command ? bashRuleMatches(r.spec, req.command) : false;
+  if (tool === 'Bash' || r.tool === 'Bash') return req.command ? bashRuleMatches(r.spec, req.command) : false;
   if (req.category === 'edit' || tool === 'Read') {
     if (!req.path) return false;
     const rel = path.relative(projectRoot, req.path).split(path.sep).join('/');

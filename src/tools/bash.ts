@@ -73,14 +73,31 @@ export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'
   }
 }
 
-interface SpawnResult {
+export interface ProcessResult {
   output: string;
+  /** stdout on its own (only with keepStdout). */
+  stdout: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
   aborted: boolean;
   durationMs: number;
+}
+
+interface SpawnResult extends ProcessResult {
   newCwd?: string;
+}
+
+export interface ProcessOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  signal: AbortSignal;
+  /** Pass the arguments to the program unquoted (cmd.exe). */
+  verbatim?: boolean;
+  /** Also keep stdout apart from stderr, for output that is parsed line by line. */
+  keepStdout?: boolean;
+  onOutput?: (chunk: string) => void;
 }
 
 /**
@@ -96,7 +113,7 @@ export function gitBashPath(bashPath: string, currentPath: string): string {
   return [...missing, ...parts].join(';');
 }
 
-function shellEnv(ctx: ToolContext): NodeJS.ProcessEnv {
+export function shellEnv(ctx: ToolContext): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   const sh = detectShell();
   if (isWindows && sh.kind === 'bash') {
@@ -175,73 +192,90 @@ export function buildInvocation(command: string, cwdFile: string | null): Invoca
   return { file: sh.path, args: ['-c', command + trailer] };
 }
 
-function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutput: (chunk: string) => void): Promise<SpawnResult> {
+/** Appends to a capture buffer, keeping the head and the most recent output once it grows too big. */
+function capture(buf: { text: string; dropped: number }, s: string): void {
+  if (buf.text.length + s.length > MAX_CAPTURE) {
+    const keepHead = buf.text.slice(0, MAX_CAPTURE / 4);
+    const tail = (buf.text + s).slice(-(MAX_CAPTURE / 2));
+    buf.dropped += buf.text.length + s.length - keepHead.length - tail.length;
+    buf.text = keepHead + `\n[... output truncated ...]\n` + tail;
+  } else buf.text += s;
+}
+
+/** Runs a program, captures its output and kills its whole process tree on timeout or abort. */
+export function runProcess(file: string, args: string[], opts: ProcessOptions): Promise<ProcessResult> {
   return new Promise((resolve) => {
     const started = Date.now();
-    // cmd.exe can't report its final directory, every other shell can.
-    const cwdFile = detectShell().kind === 'cmd' ? null : path.join(os.tmpdir(), `freecode-cwd-${process.pid}-${randomId(6)}`);
-    const { file, args, verbatim, scriptFile } = buildInvocation(command, cwdFile);
-    let cwd = ctx.session.cwd;
-    if (!existsSync(cwd)) cwd = ctx.projectRoot;
     const child = spawn(file, args, {
-      cwd,
-      env: shellEnv(ctx),
+      cwd: opts.cwd,
+      env: opts.env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: !isWindows,
       windowsHide: true,
-      windowsVerbatimArguments: verbatim,
+      windowsVerbatimArguments: opts.verbatim,
     });
-    let output = '';
-    let dropped = 0;
-    const onData = (b: Buffer) => {
+    const all = { text: '', dropped: 0 };
+    const out = { text: '', dropped: 0 };
+    child.stdout?.on('data', (b: Buffer) => {
       const s = b.toString('utf8');
-      if (output.length + s.length > MAX_CAPTURE) {
-        // Keep the head and the most recent output.
-        const keepHead = output.slice(0, MAX_CAPTURE / 4);
-        const tail = (output + s).slice(-(MAX_CAPTURE / 2));
-        dropped += output.length + s.length - keepHead.length - tail.length;
-        output = keepHead + `\n[... output truncated ...]\n` + tail;
-      } else output += s;
-      onOutput(s);
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
+      capture(all, s);
+      if (opts.keepStdout) capture(out, s);
+      opts.onOutput?.(s);
+    });
+    child.stderr?.on('data', (b: Buffer) => {
+      const s = b.toString('utf8');
+      capture(all, s);
+      opts.onOutput?.(s);
+    });
     let timedOut = false;
     let aborted = false;
     const timer = setTimeout(() => {
       timedOut = true;
       killTree(child);
       setTimeout(() => killTree(child, 'SIGKILL'), 2000).unref();
-    }, timeoutMs);
+    }, opts.timeoutMs);
     const onAbort = () => {
       aborted = true;
       killTree(child);
       setTimeout(() => killTree(child, 'SIGKILL'), 1500).unref();
     };
-    ctx.signal.addEventListener('abort', onAbort, { once: true });
-    const finish = async (code: number | null, sig: NodeJS.Signals | null) => {
+    opts.signal.addEventListener('abort', onAbort, { once: true });
+    let done = false;
+    const finish = (code: number | null, sig: NodeJS.Signals | null) => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
-      ctx.signal.removeEventListener('abort', onAbort);
-      let newCwd: string | undefined;
-      if (cwdFile) {
-        try {
-          const c = (await fsp.readFile(cwdFile, 'utf8')).trim();
-          if (c && c !== ctx.session.cwd && existsSync(c)) newCwd = c;
-          await fsp.unlink(cwdFile);
-        } catch {
-          // no cwd info
-        }
-      }
-      if (scriptFile) await fsp.unlink(scriptFile).catch(() => undefined);
-      if (dropped) output += `\n[${dropped} bytes of output were dropped]`;
-      resolve({ output, exitCode: code, signal: sig, timedOut, aborted, durationMs: Date.now() - started, newCwd });
+      opts.signal.removeEventListener('abort', onAbort);
+      if (all.dropped) all.text += `\n[${all.dropped} bytes of output were dropped]`;
+      resolve({ output: all.text, stdout: out.text, exitCode: code, signal: sig, timedOut, aborted, durationMs: Date.now() - started });
     };
     child.on('error', (e) => {
-      output += `\n${e.message}`;
-      void finish(127, null);
+      all.text += `\n${e.message}`;
+      finish(127, null);
     });
-    child.on('close', (code, sig) => void finish(code, sig));
+    child.on('close', (code, sig) => finish(code, sig));
   });
+}
+
+async function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutput: (chunk: string) => void): Promise<SpawnResult> {
+  // cmd.exe can't report its final directory, every other shell can.
+  const cwdFile = detectShell().kind === 'cmd' ? null : path.join(os.tmpdir(), `freecode-cwd-${process.pid}-${randomId(6)}`);
+  const { file, args, verbatim, scriptFile } = buildInvocation(command, cwdFile);
+  let cwd = ctx.session.cwd;
+  if (!existsSync(cwd)) cwd = ctx.projectRoot;
+  const res = await runProcess(file, args, { cwd, env: shellEnv(ctx), timeoutMs, signal: ctx.signal, verbatim, onOutput });
+  let newCwd: string | undefined;
+  if (cwdFile) {
+    try {
+      const c = (await fsp.readFile(cwdFile, 'utf8')).trim();
+      if (c && c !== ctx.session.cwd && existsSync(c)) newCwd = c;
+      await fsp.unlink(cwdFile);
+    } catch {
+      // no cwd info
+    }
+  }
+  if (scriptFile) await fsp.unlink(scriptFile).catch(() => undefined);
+  return { ...res, newCwd };
 }
 
 function startBackground(command: string, ctx: ToolContext): BackgroundShell {
