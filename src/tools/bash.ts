@@ -13,6 +13,8 @@ import { guessServerPort, listeningPortsByTree } from './ports.js';
 
 export const MAX_OUTPUT_FOR_MODEL = 20_000;
 const MAX_CAPTURE = 4 * 1024 * 1024;
+/** stdout kept for parsing (go test -json writes an event per output line). */
+const MAX_STDOUT_CAPTURE = 32 * 1024 * 1024;
 
 const INTERACTIVE: { re: RegExp; hint: string }[] = [
   { re: /^(vim?|nvim|nano|emacs|pico|joe|micro)\b/, hint: 'Text editors are interactive. Use the Edit or Write tools instead.' },
@@ -193,10 +195,10 @@ export function buildInvocation(command: string, cwdFile: string | null): Invoca
 }
 
 /** Appends to a capture buffer, keeping the head and the most recent output once it grows too big. */
-function capture(buf: { text: string; dropped: number }, s: string): void {
-  if (buf.text.length + s.length > MAX_CAPTURE) {
-    const keepHead = buf.text.slice(0, MAX_CAPTURE / 4);
-    const tail = (buf.text + s).slice(-(MAX_CAPTURE / 2));
+function capture(buf: { text: string; dropped: number }, s: string, max = MAX_CAPTURE): void {
+  if (buf.text.length + s.length > max) {
+    const keepHead = buf.text.slice(0, max / 4);
+    const tail = (buf.text + s).slice(-(max / 2));
     buf.dropped += buf.text.length + s.length - keepHead.length - tail.length;
     buf.text = keepHead + `\n[... output truncated ...]\n` + tail;
   } else buf.text += s;
@@ -219,7 +221,7 @@ export function runProcess(file: string, args: string[], opts: ProcessOptions): 
     child.stdout?.on('data', (b: Buffer) => {
       const s = b.toString('utf8');
       capture(all, s);
-      if (opts.keepStdout) capture(out, s);
+      if (opts.keepStdout) capture(out, s, MAX_STDOUT_CAPTURE);
       opts.onOutput?.(s);
     });
     child.stderr?.on('data', (b: Buffer) => {
