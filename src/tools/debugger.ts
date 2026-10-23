@@ -1,17 +1,20 @@
-// Debugger tool: drives pdb (Python) or node inspect (JavaScript), one command per call.
+// Debugger tool: Debug Adapter Protocol sessions (debugpy, lldb-dap, netcoredbg, dlv), with pdb and
+// node inspect driven through their prompts as before. One session per conversation.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import type { PreparedCall, SessionState, Tool, ToolContext, ToolResult } from './types.js';
+import type { PermissionRequest, PreparedCall, SessionState, Tool, ToolContext, ToolResult } from './types.js';
 import { errorResult, fail, numParam, ok, strParam } from './types.js';
 import { cleanOutput, killTree, MAX_OUTPUT_FOR_MODEL } from './bash.js';
 import { findPython, keepTail, PYTHON_MISSING, trackChild } from './repl.js';
+import { chooseBackend, parseAdapter, type AdapterSpec } from '../dap/adapters.js';
+import { DapSession, type BreakpointSpec, type Report, type ResumeKind, type Waiting } from '../dap/session.js';
 import { isWindows } from '../util/platform.js';
 import { formatDuration, truncate, truncateMiddle } from '../util/strings.js';
 
 type DebugLanguage = 'python' | 'node';
 type State = 'paused' | 'running' | 'exited' | 'aborted';
-type Action = 'start' | 'send' | 'stop';
+type Action = 'start' | 'send' | 'stop' | 'break' | 'clear' | 'continue' | 'next' | 'step_in' | 'step_out' | 'pause' | 'stack' | 'vars' | 'eval' | 'threads';
 
 const IDLE_MS = 15 * 60_000;
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -97,6 +100,17 @@ class DebugSession {
     this.gone(null);
   }
 
+  /** Breaks into pdb like Ctrl+C: pdb catches SIGINT while the program runs after `continue`. */
+  interrupt(): boolean {
+    if (isWindows || this.exited || !this.child.pid) return false;
+    try {
+      process.kill(this.child.pid, 'SIGINT');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Output not returned yet. */
   take(): string {
     const t = this.pending;
@@ -166,12 +180,13 @@ class DebugSession {
   }
 }
 
-const sessions = new WeakMap<SessionState, DebugSession>();
+const sessions = new WeakMap<SessionState, DebugSession | DapSession>();
 
 /** Ends the session's debugger (when the app closes the session). */
 export function stopDebugSession(session: SessionState): void {
-  sessions.get(session)?.dispose();
+  const s = sessions.get(session);
   sessions.delete(session);
+  void s?.dispose();
 }
 
 function formatInteraction(s: DebugSession, r: { output: string; state: State }, timeoutMs: number): ToolResult {
@@ -183,8 +198,22 @@ function formatInteraction(s: DebugSession, r: { output: string; state: State },
   return { content, isError: r.state === 'exited' && s.exitCode !== 0, display: { kind: 'text', text: content } };
 }
 
-async function start(lang: DebugLanguage, file: string, args: string[], timeoutMs: number, ctx: ToolContext): Promise<ToolResult> {
-  stopDebugSession(ctx.session);
+function withNote(r: ToolResult, note: string | undefined): ToolResult {
+  if (!note) return r;
+  const content = `${note}\n${r.content}`;
+  return { ...r, content, display: { kind: 'text', text: content } };
+}
+
+/** The pdb or node inspect command that sets a breakpoint. */
+function breakCommand(lang: DebugLanguage, bp: BreakpointSpec): string {
+  if (lang === 'python') return `b ${bp.name ?? `${bp.file}:${bp.line}`}${bp.condition ? `, ${bp.condition}` : ''}`;
+  // node inspect matches the script by the end of its URL, which has forward slashes.
+  const target = bp.name ? `${bp.name}()` : bp.file!.replace(/\\/g, '/');
+  return `sb(${JSON.stringify(target)}${bp.line ? `, ${bp.line}` : ''}${bp.condition ? `, ${JSON.stringify(bp.condition)}` : ''})`;
+}
+
+async function startPrompt(lang: DebugLanguage, file: string, args: string[], cwd: string, breakpoints: BreakpointSpec[], note: string | undefined, timeoutMs: number, ctx: ToolContext): Promise<ToolResult> {
+  await disposeSession(ctx.session);
   const env: NodeJS.ProcessEnv = { ...process.env, ...ctx.settings.env, FREECODE: '1' };
   let command: string;
   let commandArgs: string[];
@@ -201,35 +230,106 @@ async function start(lang: DebugLanguage, file: string, args: string[], timeoutM
     commandArgs = ['inspect', '--port=0', file, ...args];
     Object.assign(env, { NODE_DISABLE_COLORS: '1', NO_COLOR: '1', FORCE_COLOR: '0' });
   }
-  const cwd = existsSync(ctx.session.cwd) ? ctx.session.cwd : ctx.projectRoot;
   const child = spawn(command, commandArgs, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: !isWindows, windowsHide: true });
   const s = new DebugSession(lang, child, (gone) => {
     if (sessions.get(ctx.session) === gone) sessions.delete(ctx.session);
   });
   sessions.set(ctx.session, s);
-  return formatInteraction(s, await s.interact(null, timeoutMs, ctx.signal, ctx.services.progress), timeoutMs);
+  const run = (cmd: string | null) => s.interact(cmd, timeoutMs, ctx.signal, ctx.services.progress);
+  let r = await run(null);
+  // Breakpoints given with start: set them at the first prompt, then run to the first one.
+  if (breakpoints.length && r.state === 'paused') {
+    const set = await run(breakpoints.map((bp) => breakCommand(lang, bp)).join('\n'));
+    const cont = set.state === 'paused' ? await run('c') : null;
+    r = { output: r.output + set.output + (cont?.output ?? ''), state: cont?.state ?? set.state };
+  }
+  return withNote(formatInteraction(s, r, timeoutMs), note);
 }
 
-function languageOf(file: string): DebugLanguage | 'typescript' | null {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === '.py' || ext === '.pyw') return 'python';
-  if (ext === '.js' || ext === '.mjs' || ext === '.cjs') return 'node';
-  if (['.ts', '.tsx', '.mts', '.cts'].includes(ext)) return 'typescript';
-  return null;
+async function disposeSession(session: SessionState): Promise<void> {
+  const s = sessions.get(session);
+  sessions.delete(session);
+  await s?.dispose();
 }
+
+// ------------------------------------------------------------------ parameters
+
+const ACTIONS: Record<string, Action> = {
+  start: 'start',
+  launch: 'start',
+  restart: 'start',
+  debug: 'start',
+  send: 'send',
+  command: 'send',
+  wait: 'send',
+  console: 'send',
+  stop: 'stop',
+  quit: 'stop',
+  exit: 'stop',
+  kill: 'stop',
+  terminate: 'stop',
+  disconnect: 'stop',
+  break: 'break',
+  breakpoint: 'break',
+  set_breakpoint: 'break',
+  b: 'break',
+  clear: 'clear',
+  clear_breakpoint: 'clear',
+  remove_breakpoint: 'clear',
+  delete_breakpoint: 'clear',
+  continue: 'continue',
+  cont: 'continue',
+  c: 'continue',
+  resume: 'continue',
+  next: 'next',
+  n: 'next',
+  over: 'next',
+  step_over: 'next',
+  stepover: 'next',
+  step: 'step_in',
+  s: 'step_in',
+  step_in: 'step_in',
+  stepin: 'step_in',
+  into: 'step_in',
+  step_into: 'step_in',
+  step_out: 'step_out',
+  stepout: 'step_out',
+  out: 'step_out',
+  finish: 'step_out',
+  pause: 'pause',
+  interrupt: 'pause',
+  stack: 'stack',
+  bt: 'stack',
+  backtrace: 'stack',
+  where: 'stack',
+  stacktrace: 'stack',
+  frames: 'stack',
+  vars: 'vars',
+  variables: 'vars',
+  locals: 'vars',
+  scopes: 'vars',
+  eval: 'eval',
+  evaluate: 'eval',
+  print: 'eval',
+  p: 'eval',
+  inspect: 'eval',
+  threads: 'threads',
+};
+
+const ACTION_LIST = 'start, break, clear, continue, next, step_in, step_out, pause, stack, vars, eval, threads, send or stop';
 
 function actionOf(input: Record<string, unknown>): Action | null {
-  const a = strParam(input, 'action', 'op')?.trim().toLowerCase();
-  if (a === 'start' || a === 'launch' || a === 'restart') return 'start';
-  if (a === 'send' || a === 'command' || a === 'wait') return 'send';
-  if (a === 'stop' || a === 'quit' || a === 'exit' || a === 'kill') return 'stop';
-  if (a) return null;
-  if (fileParam(input)) return 'start';
+  const a = strParam(input, 'action', 'op')?.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (a) return ACTIONS[a] ?? null;
+  if (programParam(input)) return 'start';
+  if (strParam(input, 'expression', 'expr') !== undefined) return 'eval';
   return strParam(input, 'command', 'cmd') !== undefined ? 'send' : null;
 }
 
-const fileParam = (input: Record<string, unknown>) => strParam(input, 'file', 'file_path', 'path', 'script', 'program');
+const programParam = (input: Record<string, unknown>) => strParam(input, 'program', 'file', 'file_path', 'path', 'script');
 const commandParam = (input: Record<string, unknown>) => strParam(input, 'command', 'cmd', 'input') ?? '';
+const expressionParam = (input: Record<string, unknown>) => strParam(input, 'expression', 'expr', 'command', 'code') ?? '';
+const conditionParam = (input: Record<string, unknown>) => strParam(input, 'condition', 'cond', 'if', 'when')?.trim() || undefined;
 
 function argsParam(input: Record<string, unknown>): string[] {
   const v = input.args ?? input.argv ?? input.arguments;
@@ -237,93 +337,307 @@ function argsParam(input: Record<string, unknown>): string[] {
   return typeof v === 'string' && v.trim() ? v.trim().split(/\s+/) : [];
 }
 
-const DEBUG_NAME: Record<DebugLanguage, string> = { python: 'Python', node: 'Node' };
+/** file:line (a breakpoint), a file without a line (clear: all of its breakpoints) or a function name. */
+function parseLocation(loc: string, cwd: string): BreakpointSpec | { error: string } {
+  if (/[\r\n]/.test(loc)) return { error: 'A breakpoint location is one line: file:line or a function name.' };
+  const m = /^(.*\S):(\d+)$/.exec(loc);
+  if (m) {
+    const file = path.resolve(cwd, m[1]!);
+    if (!existsSync(file)) return { error: `File not found: ${file}` };
+    return { file, line: Number(m[2]) };
+  }
+  const asFile = path.resolve(cwd, loc);
+  if (/[\\/.]/.test(loc) && existsSync(asFile) && statSync(asFile).isFile()) return { file: asFile };
+  if (!/^[\w$.:<>~*&, ]+$/.test(loc)) return { error: `"${loc}" is neither file:line nor a function name.` };
+  return { name: loc };
+}
+
+/** The location of break and clear, from location (or file and line). */
+function locationParam(input: Record<string, unknown>, cwd: string): BreakpointSpec | { error: string } | null {
+  const line = numParam(input, 'line', 'lineno', 'line_number');
+  let loc = strParam(input, 'location', 'breakpoint', 'at', 'function', 'func')?.trim();
+  const file = strParam(input, 'file', 'path', 'file_path', 'source')?.trim();
+  if (!loc && file) loc = file;
+  if (!loc) return null;
+  if (line !== undefined && !/:\d+$/.test(loc)) loc = `${loc}:${line}`;
+  return parseLocation(loc, cwd);
+}
+
+const shownLocation = (bp: BreakpointSpec, cwd: string) => bp.name ?? `${path.relative(cwd, bp.file!) || bp.file}:${bp.line}`;
+
+/** Breakpoints given with start: "file:line" strings or {file, line, condition} objects. */
+function breakpointsParam(input: Record<string, unknown>, cwd: string): BreakpointSpec[] | { error: string } {
+  let v = input.breakpoints ?? input.breakpoint ?? input.break;
+  if (typeof v === 'string') v = v.split(/[,;]\s*|\s+(?=\S+:\d+)/).filter(Boolean);
+  if (!Array.isArray(v)) return [];
+  const out: BreakpointSpec[] = [];
+  for (const item of v) {
+    let spec: BreakpointSpec | { error: string };
+    if (typeof item === 'string') spec = parseLocation(item.trim(), cwd);
+    else if (item && typeof item === 'object') {
+      const o = item as Record<string, unknown>;
+      const loc = locationParam(o, cwd);
+      spec = loc ?? { error: 'Each breakpoint needs a file and line (or a function name).' };
+      if (!('error' in spec)) spec.condition = conditionParam(o);
+    } else continue;
+    if ('error' in spec) return spec;
+    if (!spec.name && !spec.line) return { error: `Give a line for the breakpoint in ${spec.file} (file:line).` };
+    out.push(spec);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ permissions
+
+const KIND_NAME: Record<string, string> = { python: 'Python', node: 'Node', native: 'Native code', go: 'Go', csharp: 'C#' };
+
+function permission(kind: string, title: string, subject: string): PermissionRequest {
+  return { tool: 'Debugger', category: 'execute', title, subject, specifier: kind, ruleSuggestion: `Debugger(${kind})`, ruleLabel: `${KIND_NAME[kind] ?? kind} debugging` };
+}
+
+// ------------------------------------------------------------------ actions
+
+async function prepareStart(input: Record<string, unknown>, ctx: ToolContext, timeout: number): Promise<PreparedCall> {
+  const raw = programParam(input);
+  if (!raw) return errorResult('Missing required parameter: program');
+  const adapter = parseAdapter(strParam(input, 'adapter', 'debugger', 'engine'));
+  if (!adapter) return errorResult('adapter must be auto, debugpy, pdb, node, lldb-dap, netcoredbg or dlv.');
+  const cwdRaw = strParam(input, 'cwd', 'working_directory', 'workdir');
+  const cwd = cwdRaw ? path.resolve(ctx.session.cwd, cwdRaw) : existsSync(ctx.session.cwd) ? ctx.session.cwd : ctx.projectRoot;
+  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) return errorResult(`Working directory not found: ${cwd}`);
+  // A relative program is looked up in the current folder, then in cwd.
+  let abs = path.resolve(ctx.session.cwd, raw);
+  if (!existsSync(abs) && cwdRaw && existsSync(path.resolve(cwd, raw))) abs = path.resolve(cwd, raw);
+  const breakpoints = breakpointsParam(input, ctx.session.cwd);
+  if ('error' in breakpoints) return errorResult(breakpoints.error);
+  const backend = await chooseBackend(abs, adapter);
+  if ('error' in backend) return errorResult(backend.error);
+  const args = argsParam(input);
+  const shown = path.relative(ctx.session.cwd, abs) || abs;
+  if (backend.type !== 'dap') {
+    const lang: DebugLanguage = backend.type === 'pdb' ? 'python' : 'node';
+    if (!existsSync(abs) || !statSync(abs).isFile()) return errorResult(`File not found: ${abs}`);
+    const note = backend.type === 'pdb' ? backend.note : undefined;
+    return {
+      permission: permission(lang, `Debug ${KIND_NAME[lang]} script`, `${lang === 'python' ? 'python -m pdb' : 'node inspect'} ${[shown, ...args].join(' ')}`),
+      execute: () => startPrompt(lang, abs, args, cwd, breakpoints, note, timeout, ctx),
+    };
+  }
+  const spec: AdapterSpec = backend.spec;
+  const program = backend.program;
+  return {
+    permission: permission(spec.kind, `Debug ${KIND_NAME[spec.kind]} program`, `${spec.name} ${[path.relative(ctx.session.cwd, program) || program, ...args].join(' ')}`),
+    execute: async () => {
+      await disposeSession(ctx.session);
+      const { session, report } = await DapSession.start({
+        spec,
+        target: { program, args, cwd, stopOnEntry: breakpoints.length === 0 },
+        breakpoints,
+        env: { ...process.env, ...ctx.settings.env, FREECODE: '1' },
+        baseDir: ctx.session.cwd,
+        wait: waiting(ctx, timeout),
+      });
+      if (session) sessions.set(ctx.session, session);
+      return dapResult(report);
+    },
+  };
+}
+
+const waiting = (ctx: ToolContext, timeoutMs: number): Waiting => ({ timeoutMs, signal: ctx.signal, progress: ctx.services.progress });
+
+function dapResult(r: Report): ToolResult {
+  const content = truncateMiddle(r.text || '(no output)', MAX_OUTPUT_FOR_MODEL, 0.3);
+  return { content, isError: !!r.isError, display: { kind: 'text', text: content } };
+}
+
+const RESUME: Partial<Record<Action, ResumeKind>> = { continue: 'continue', next: 'next', step_in: 'stepIn', step_out: 'stepOut' };
+
+function prepareDap(s: DapSession, action: Action, input: Record<string, unknown>, ctx: ToolContext, timeout: number): PreparedCall {
+  const w = waiting(ctx, timeout);
+  const frame = Math.max(0, Math.floor(numParam(input, 'frame', 'frame_index', 'frameIndex') ?? 0));
+  const thread = numParam(input, 'thread', 'thread_id', 'threadId');
+  const depth = Math.min(3, Math.max(0, Math.floor(numParam(input, 'depth', 'expand') ?? 1)));
+  const run =
+    (fn: () => Promise<string | Report>) =>
+    async (): Promise<ToolResult> => {
+      try {
+        // The program ended since the last call: report how, once.
+        if (s.ended) return dapResult(s.finalReport());
+        const r = await fn();
+        return dapResult(typeof r === 'string' ? { text: r } : r);
+      } catch (e) {
+        return fail((e as Error).message);
+      } finally {
+        if (s.ended && sessions.get(ctx.session) === s) sessions.delete(ctx.session);
+      }
+    };
+  const kind = s.spec.kind;
+  const resume = RESUME[action];
+  if (resume) return { execute: run(() => s.resume(resume, w, thread)) };
+  switch (action) {
+    case 'pause':
+      return { execute: run(() => s.pause(w)) };
+    case 'stack':
+      return { execute: run(() => s.stack(thread)) };
+    case 'threads':
+      return { execute: run(() => s.threads()) };
+    case 'vars':
+      return { execute: run(() => s.variables({ frame, thread, depth, scope: strParam(input, 'scope') })) };
+    case 'eval': {
+      const expression = expressionParam(input);
+      if (!expression.trim()) return errorResult('Missing required parameter: expression');
+      return { permission: permission(kind, 'Debugger expression', expression), execute: run(() => s.evaluate(expression, { frame, thread, depth })) };
+    }
+    case 'break': {
+      const loc = locationParam(input, ctx.session.cwd);
+      if (!loc) return errorResult('Missing required parameter: location (file:line or a function name)');
+      if ('error' in loc) return errorResult(loc.error);
+      if (!loc.name && !loc.line) return errorResult(`Give a line: ${path.relative(ctx.session.cwd, loc.file!) || loc.file}:<line>.`);
+      const condition = conditionParam(input);
+      const execute = run(() => s.setBreakpoint({ ...loc, condition }));
+      // A condition is code that runs in the program.
+      return condition ? { permission: permission(kind, 'Conditional breakpoint', `${shownLocation(loc, ctx.session.cwd)} if ${condition}`), execute } : { execute };
+    }
+    case 'clear': {
+      const loc = locationParam(input, ctx.session.cwd);
+      if (loc && 'error' in loc) return errorResult(loc.error);
+      return { execute: run(() => s.clearBreakpoints(loc)) };
+    }
+    default: {
+      const command = commandParam(input);
+      if (!command.trim()) return { execute: run(() => s.wait(w)) };
+      return { permission: permission(kind, 'Debugger command', command), execute: run(() => s.console(command, w)) };
+    }
+  }
+}
+
+/** Structured actions on a pdb or node inspect session become their commands. */
+function preparePrompt(s: DebugSession, action: Action, input: Record<string, unknown>, ctx: ToolContext, timeout: number): PreparedCall {
+  const lang = s.lang;
+  const name = lang === 'python' ? 'pdb' : 'node inspect';
+  const send = (command: string | null) => async () => formatInteraction(s, await s.interact(command, timeout, ctx.signal, ctx.services.progress), timeout);
+  if ((action === 'vars' || action === 'eval') && (numParam(input, 'frame') ?? 0) > 0) {
+    return errorResult(lang === 'python' ? 'With pdb, move to an outer frame with send command "u" (and back with "d"), then use eval or vars.' : 'node inspect only looks at the innermost frame. Use stack to see the others.');
+  }
+  switch (action) {
+    case 'send': {
+      const command = commandParam(input);
+      // Waiting runs nothing new.
+      if (!command.trim()) return { execute: send(null) };
+      return { permission: permission(lang, 'Debugger command', command), execute: send(command) };
+    }
+    case 'continue':
+      return { execute: send('c') };
+    case 'next':
+      return { execute: send('n') };
+    case 'step_in':
+      return { execute: send('s') };
+    case 'step_out':
+      return { execute: send(lang === 'python' ? 'r' : 'o') };
+    case 'stack':
+      return { execute: send(lang === 'python' ? 'w' : 'bt') };
+    case 'threads':
+      return errorResult(`${name} shows no threads. Use stack for the call stack.`);
+    case 'pause':
+      if (lang === 'node') return { execute: send('pause') };
+      if (!s.running) return { execute: async () => ok('The program is already paused at the pdb prompt.') };
+      if (isWindows) return errorResult('pdb cannot be paused on Windows. Wait with send (no command), or stop and start again with a breakpoint.');
+      return { execute: async () => (s.interrupt() ? send(null)() : fail('Could not interrupt the program.')) };
+    case 'vars':
+      if (lang === 'node') return errorResult('node inspect cannot list variables. Use eval with the names you need (or an object literal like {a, b}).');
+      return { execute: send("pp {k: v for k, v in locals().items() if not k.startswith('__') and type(v).__name__ not in ('module', 'function', 'type')}") };
+    case 'eval': {
+      const expression = expressionParam(input).trim();
+      if (!expression) return errorResult('Missing required parameter: expression');
+      if (expression.includes('\n')) return errorResult(`${name} evaluates one line at a time.`);
+      return { permission: permission(lang, 'Debugger expression', expression), execute: send(lang === 'python' ? `p ${expression}` : `exec ${expression}`) };
+    }
+    case 'break': {
+      const loc = locationParam(input, ctx.session.cwd);
+      if (!loc) return errorResult('Missing required parameter: location (file:line or a function name)');
+      if ('error' in loc) return errorResult(loc.error);
+      if (!loc.name && !loc.line) return errorResult('Give a line: file:<line>.');
+      const condition = conditionParam(input);
+      if (condition?.includes('\n')) return errorResult('A condition is one line.');
+      const execute = send(breakCommand(lang, { ...loc, condition }));
+      return condition ? { permission: permission(lang, 'Conditional breakpoint', `${shownLocation(loc, ctx.session.cwd)} if ${condition}`), execute } : { execute };
+    }
+    case 'clear': {
+      const loc = locationParam(input, ctx.session.cwd);
+      if (loc && 'error' in loc) return errorResult(loc.error);
+      if (!loc?.file || !loc.line) return errorResult(`With ${name}, clear takes one breakpoint as file:line.`);
+      return { execute: send(lang === 'python' ? `cl ${loc.file}:${loc.line}` : `cb(${JSON.stringify(loc.file.replace(/\\/g, '/'))}, ${loc.line})`) };
+    }
+    default:
+      return errorResult(`action must be ${ACTION_LIST}.`);
+  }
+}
+
+async function stopAction(ctx: ToolContext): Promise<ToolResult> {
+  const s = sessions.get(ctx.session);
+  if (!s) return ok('No debug session is running.');
+  let output: string;
+  if (s instanceof DapSession) output = s.ended ? s.finalReport().text : s.takeOutput();
+  else output = forModel(s.take(), s.lang);
+  await disposeSession(ctx.session);
+  return ok(`${output ? `${output}\n` : ''}Debug session stopped.`);
+}
 
 export const DebuggerTool: Tool = {
   name: 'Debugger',
   category: 'execute',
   description:
-    'Step through a Python or Node.js program with a line debugger (pdb or node inspect) to find where it goes wrong and what the variables hold. ' +
-    'action=start runs `file` (with optional `args`) paused at its first line; action=send types a debugger `command` (several lines run in order) and returns the output up to the next prompt; action=stop ends the session. ' +
-    'One session at a time: start again to restart. If the program is still running when the timeout ends, the result says so; send with no command to keep waiting. ' +
-    'For TypeScript, compile first and debug the .js output.\n' +
-    'pdb: b file:line (breakpoint), c (continue), n (next line), s (step into), r (run to return), p expr, pp locals(), w (stack), l (list), q (quit).\n' +
-    "node inspect: sb('file.js', 10) (breakpoint), c, n, s, o (step out), exec expr, bt (stack), list(5), watch('expr'), .exit.",
+    'Debug a program: pause it at breakpoints, step through it and read variables to see where it goes wrong. ' +
+    'Python runs under debugpy (pdb when debugpy is missing), JavaScript under node inspect, C, C++, Rust and Swift executables under lldb-dap, C# under netcoredbg (start the built .dll) and Go under Delve (start a .go file or package folder). ' +
+    'action=start runs `program` (with `args`, `cwd`) and pauses at its start, or runs to the first of `breakpoints` (file:line) when given. ' +
+    'Then: break (`location` file:line or a function name, optional `condition`), clear, continue, next (step over), step_in, step_out, pause, stack, vars (variables of `frame`, nested values `depth` levels deep), eval (`expression`), threads and stop. ' +
+    'Each stop shows the location, the source around it and the top frames. send types a raw debugger `command` (pdb or node inspect syntax, or the debug console of the adapter); send with no command waits for a running program to stop. ' +
+    'One session at a time: start again to restart. Build native programs with debug info first (cc -g, cargo build, dotnet build); compile TypeScript and debug the .js output.\n' +
+    "pdb: b file:line, c, n, s, r, p expr, pp locals(), w, l, q. node inspect: sb('file.js', 10), c, n, s, o, exec expr, bt, list(5).",
   parameters: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['start', 'send', 'stop'], description: 'start a session, send a command, or stop' },
-      file: { type: 'string', description: 'Script to debug (.py, .js, .mjs, .cjs), for start' },
-      args: { type: 'array', items: { type: 'string' }, description: 'Arguments for the script, for start' },
-      command: { type: 'string', description: 'Debugger command, for send. Leave out to wait for a running program to stop' },
-      timeout: { type: 'number', description: `How long to wait for the debugger prompt in milliseconds (default ${DEFAULT_TIMEOUT_MS})` },
+      action: { type: 'string', enum: ['start', 'break', 'clear', 'continue', 'next', 'step_in', 'step_out', 'pause', 'stack', 'vars', 'eval', 'threads', 'send', 'stop'], description: 'What to do' },
+      program: { type: 'string', description: 'For start: a .py, .js, .go or .dll file, a Go package folder or a native executable' },
+      args: { type: 'array', items: { type: 'string' }, description: 'Program arguments, for start' },
+      cwd: { type: 'string', description: 'Working directory of the program, for start (default: the current folder)' },
+      adapter: { type: 'string', enum: ['auto', 'debugpy', 'pdb', 'node', 'lldb-dap', 'netcoredbg', 'dlv'], description: 'Debugger to use, for start (default: picked from the program)' },
+      breakpoints: { type: 'array', items: { type: 'string' }, description: 'file:line breakpoints to set before the program runs, for start' },
+      location: { type: 'string', description: 'file:line or a function name, for break and clear (clear without it removes all)' },
+      condition: { type: 'string', description: 'For break: stop only when this expression is true' },
+      expression: { type: 'string', description: 'Expression to evaluate, for eval' },
+      frame: { type: 'number', description: 'Stack frame for vars and eval (0 = innermost, the default)' },
+      depth: { type: 'number', description: 'Levels of nested values vars and eval expand (default 1, max 3)' },
+      scope: { type: 'string', description: 'For vars: a scope other than the locals, e.g. globals, registers or all' },
+      thread: { type: 'number', description: 'Thread for stack, vars, eval and stepping (default: the one that stopped)' },
+      command: { type: 'string', description: 'Raw debugger command, for send. Leave out to wait for a running program to stop' },
+      timeout: { type: 'number', description: `How long to wait for the program to stop, in milliseconds (default ${DEFAULT_TIMEOUT_MS})` },
     },
     required: ['action'],
   },
   label: (input) => {
     const action = actionOf(input);
-    if (action === 'start') return `Debugger(start ${truncate(fileParam(input) ?? '?', 60)})`;
+    if (action === 'start') return `Debugger(start ${truncate(programParam(input) ?? '?', 60)})`;
     if (action === 'stop') return 'Debugger(stop)';
+    if (action === 'eval') return `Debugger(eval ${truncate(expressionParam(input).trim().replace(/\s+/g, ' '), 60)})`;
+    if (action === 'break' || action === 'clear') {
+      const loc = strParam(input, 'location', 'breakpoint', 'at', 'function', 'func') ?? strParam(input, 'file', 'path');
+      const line = numParam(input, 'line');
+      return `Debugger(${action}${loc ? ` ${truncate(loc, 60)}${line !== undefined && !/:\d+$/.test(loc) ? `:${line}` : ''}` : ''})`;
+    }
+    if (action && action !== 'send') return `Debugger(${action})`;
     const command = commandParam(input).trim().replace(/\s+/g, ' ');
     return `Debugger(${command ? truncate(command, 60) : 'wait'})`;
   },
   async prepare(input, ctx): Promise<PreparedCall> {
     const action = actionOf(input);
-    if (!action) return errorResult('action must be "start", "send" or "stop".');
+    if (!action) return errorResult(`action must be ${ACTION_LIST}.`);
     const timeout = Math.min(MAX_TIMEOUT_MS, Math.max(1000, numParam(input, 'timeout', 'timeout_ms') ?? DEFAULT_TIMEOUT_MS));
-    if (action === 'stop') {
-      return {
-        execute: async () => {
-          const s = sessions.get(ctx.session);
-          if (!s) return ok('No debug session is running.');
-          const output = forModel(s.take(), s.lang);
-          stopDebugSession(ctx.session);
-          return ok(`${output ? `${output}\n` : ''}Debug session stopped.`);
-        },
-      };
-    }
-    if (action === 'send') {
-      const s = sessions.get(ctx.session);
-      if (!s) return errorResult('No debug session is running. Start one with action "start" and a file.');
-      const command = commandParam(input);
-      const execute = async () => formatInteraction(s, await s.interact(command.trim() ? command : null, timeout, ctx.signal, ctx.services.progress), timeout);
-      // Waiting runs nothing new.
-      if (!command.trim()) return { execute };
-      return {
-        permission: {
-          tool: 'Debugger',
-          category: 'execute',
-          title: 'Debugger command',
-          subject: command,
-          specifier: s.lang,
-          ruleSuggestion: `Debugger(${s.lang})`,
-          ruleLabel: `${DEBUG_NAME[s.lang]} debugging`,
-        },
-        execute,
-      };
-    }
-    const file = fileParam(input);
-    if (!file) return errorResult('Missing required parameter: file');
-    const abs = path.resolve(ctx.session.cwd, file);
-    const lang = languageOf(abs);
-    if (lang === 'typescript') {
-      return errorResult('TypeScript cannot be debugged directly. Compile it first (for example `npx tsc`) and start the debugger on the generated .js file; line numbers then follow the .js file.');
-    }
-    if (!lang) return errorResult('The debugger supports Python (.py) and JavaScript (.js, .mjs, .cjs) files.');
-    if (!existsSync(abs) || !statSync(abs).isFile()) return errorResult(`File not found: ${abs}`);
-    const args = argsParam(input);
-    const shown = path.relative(ctx.session.cwd, abs) || abs;
-    return {
-      permission: {
-        tool: 'Debugger',
-        category: 'execute',
-        title: `Debug ${DEBUG_NAME[lang]} script`,
-        subject: `${lang === 'python' ? 'python -m pdb' : 'node inspect'} ${[shown, ...args].join(' ')}`,
-        specifier: lang,
-        ruleSuggestion: `Debugger(${lang})`,
-        ruleLabel: `${DEBUG_NAME[lang]} debugging`,
-      },
-      execute: () => start(lang, abs, args, timeout, ctx),
-    };
+    if (action === 'start') return prepareStart(input, ctx, timeout);
+    if (action === 'stop') return { execute: () => stopAction(ctx) };
+    const s = sessions.get(ctx.session);
+    if (!s) return errorResult('No debug session is running. Start one with action "start" and a program.');
+    if (s instanceof DapSession) return prepareDap(s, action, input, ctx, timeout);
+    return preparePrompt(s, action, input, ctx, timeout);
   },
 };
