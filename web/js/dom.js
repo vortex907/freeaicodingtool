@@ -114,6 +114,11 @@ export function fmtTokens(n) {
   return (n / 1e6).toFixed(1) + 'M';
 }
 
+export function fmtUsd(usd) {
+  usd = usd || 0;
+  return usd > 0 && usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
 export function fmtDuration(ms) {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
   const s = ms / 1000;

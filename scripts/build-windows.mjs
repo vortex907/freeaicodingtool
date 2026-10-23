@@ -91,6 +91,21 @@ for (const entry of ['bin', 'web', 'assets', 'package.json', 'README.md', 'LICEN
   if (existsSync(path.join(root, entry))) cpSync(path.join(root, entry), path.join(app, entry), { recursive: true });
 }
 cpSync(path.join(root, 'dist', 'src'), path.join(app, 'dist', 'src'), { recursive: true, filter: (src) => !src.endsWith('.map') });
+// Runtime dependencies (the Anthropic SDK and what it loads), without type definitions, source maps,
+// docs and the SDK's TypeScript sources.
+const nodeModules = path.join(root, 'node_modules');
+const depDirs = execFileSync('npm', ['ls', '--omit=dev', '--all', '--parseable'], { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' })
+  .trim()
+  .split(/\r?\n/)
+  .slice(1)
+  .filter((d) => d.startsWith(nodeModules));
+const skipFile = (f) => /\.(map|d\.ts|d\.mts|d\.cts|md|markdown)$/i.test(f) && !/license/i.test(path.basename(f));
+for (const dir of depDirs) {
+  const sdkSources = path.join(nodeModules, '@anthropic-ai', 'sdk', 'src');
+  cpSync(dir, path.join(app, 'node_modules', path.relative(nodeModules, dir)), { recursive: true, filter: (f) => f === dir || (!skipFile(f) && f !== sdkSources) });
+}
+// The packaged app has to load them on its own.
+run(process.execPath, ['--input-type=module', '-e', "await import('@anthropic-ai/sdk'); console.log('  runtime dependencies load')"], { cwd: app });
 copyFileSync(path.join(win, 'freecode.cmd'), path.join(stage, 'freecode.cmd'));
 copyFileSync(path.join(win, 'helper.ps1'), path.join(stage, 'helper.ps1'));
 copyFileSync(path.join(root, 'assets', 'freecode.ico'), path.join(stage, 'FreeCode.ico'));

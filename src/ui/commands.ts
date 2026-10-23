@@ -26,6 +26,7 @@ import { displayPath } from '../util/fs.js';
 import { git } from '../util/git.js';
 import { ripgrepPath, detectShell } from '../util/platform.js';
 import { VERSION } from '../version.js';
+import { formatUsd } from '../providers/cost.js';
 import { debugLogPath, isDebug } from '../util/log.js';
 
 export interface ReplApi {
@@ -208,6 +209,25 @@ export function builtinCommands(): SlashCommand[] {
       },
     },
     {
+      name: 'effort',
+      description: 'How hard models that support it think (Claude, GPT-5, gpt-oss)',
+      args: '[auto|low|medium|high|max]',
+      run: (r, args) => {
+        const a = args.trim().toLowerCase();
+        const levels = ['auto', 'low', 'medium', 'high', 'max'];
+        if (!a) {
+          r.info(`Effort: ${r.app.settings.effort ?? 'auto'}. Low is faster and cheaper, high and max think more. Applies to Claude, GPT-5 and gpt-oss models.`);
+          return;
+        }
+        if (!levels.includes(a)) return r.error(`Effort is one of: ${levels.join(', ')}`);
+        updateGlobalConfig((g) => {
+          g.effort = a as never;
+        });
+        r.refreshAfterConfigChange();
+        r.info(a === 'auto' ? 'Effort: each model uses its own default.' : `Effort: ${a}.`);
+      },
+    },
+    {
       name: 'router',
       description: 'Router settings: on/off (AI task classification), status, paid on/off',
       args: '[on|off|status|paid on|paid off]',
@@ -249,7 +269,9 @@ export function builtinCommands(): SlashCommand[] {
       description: 'Requests and tokens used (session and today)',
       run: (r) => {
         const a = r.app.agent;
-        const lines = ['', c.bold('This session'), `  ${a.requestCount} requests · ${formatTokens(a.totalUsage.promptTokens)} tokens in · ${formatTokens(a.totalUsage.completionTokens)} out · cost $0.00 (free models)`];
+        const u = a.totalUsage;
+        const cached = u.cacheReadTokens ? ` (${formatTokens(u.cacheReadTokens)} from cache)` : '';
+        const lines = ['', c.bold('This session'), `  ${a.requestCount} requests · ${formatTokens(u.promptTokens)} tokens in${cached} · ${formatTokens(u.completionTokens)} out · cost ${u.costUsd ? formatUsd(u.costUsd) : '$0.00 (free models)'}`];
         if (a.modelsUsed.size) lines.push(`  models: ${[...a.modelsUsed.entries()].map(([k, n]) => `${k} (${n})`).join(', ')}`);
         lines.push('', c.bold(`Today (${today()})`));
         const usage = r.app.health.allUsageToday();

@@ -14,6 +14,7 @@ export function buildModel_forValidation(def: ProviderDef, id: string): ModelInf
     speed: 50,
     reasoning: false,
     vision: false,
+    effort: false,
     limits: {},
     roles: [],
     source: 'seed',

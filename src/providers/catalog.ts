@@ -46,7 +46,7 @@ export const PROVIDERS: ProviderDef[] = [
     kind: 'free',
     speed: 45,
     headers: { 'HTTP-Referer': 'https://github.com/vortex907/freeaicodingtool', 'X-Title': 'FreeCode' },
-    quirks: { streamUsage: true },
+    quirks: { streamUsage: true, reasoningEffort: 'openrouter' },
     limits: { rpm: 20, rpd: 50 },
     models: [
       { id: 'openai/gpt-oss-120b:free', context: 131072, maxOutput: 32768, quality: 73, speed: 55, reasoning: true },
@@ -70,7 +70,7 @@ export const PROVIDERS: ProviderDef[] = [
     freeTier: 'Free tier on all models: ~30 req/min, 1K-14K req/day; small per-minute token caps (6K-30K TPM). Extremely fast.',
     kind: 'free',
     speed: 95,
-    quirks: { streamUsage: true },
+    quirks: { streamUsage: true, reasoningEffort: 'openai' },
     models: [
       { id: 'moonshotai/kimi-k2-instruct-0905', context: 262144, maxOutput: 16384, quality: 85, speed: 92, limits: { rpm: 60, rpd: 1000, tpm: 10000, tpd: 300000 } },
       { id: 'openai/gpt-oss-120b', context: 131072, maxOutput: 65536, quality: 74, speed: 96, reasoning: true, limits: { rpm: 30, rpd: 1000, tpm: 8000, tpd: 200000 } },
@@ -96,7 +96,7 @@ export const PROVIDERS: ProviderDef[] = [
     freeTier: 'Free tier (~1M tokens/day, small req/min) on GLM, gpt-oss and Qwen models. Thousands of tokens/sec.',
     kind: 'free',
     speed: 98,
-    quirks: { streamUsage: true },
+    quirks: { streamUsage: true, reasoningEffort: 'openai' },
     models: [
       { id: 'zai-glm-4.7', context: 131072, maxOutput: 40000, quality: 84, speed: 97, reasoning: true, limits: { rpm: 10, tpm: 60000, tpd: 1000000 } },
       { id: 'gpt-oss-120b', context: 131072, maxOutput: 40000, quality: 74, speed: 99, reasoning: true, limits: { rpm: 10, tpm: 60000, tpd: 1000000 } },
@@ -475,7 +475,7 @@ export const PROVIDERS: ProviderDef[] = [
     freeTier: 'Paid; only used automatically if router.allowPaid is on',
     kind: 'paid',
     speed: 65,
-    quirks: { streamUsage: true, maxTokensField: 'max_completion_tokens', noTemperature: true },
+    quirks: { streamUsage: true, maxTokensField: 'max_completion_tokens', noTemperature: true, reasoningEffort: 'openai' },
     models: [
       { id: 'gpt-5-mini', context: 400000, maxOutput: 128000, quality: 84, speed: 60, reasoning: true },
       { id: 'gpt-5', context: 400000, maxOutput: 128000, quality: 93, speed: 40, reasoning: true, vision: true },
@@ -486,22 +486,21 @@ export const PROVIDERS: ProviderDef[] = [
     id: 'anthropic',
     name: 'Anthropic Claude (paid)',
     baseURL: 'https://api.anthropic.com/v1',
+    // The Messages API through the official SDK (anthropic.ts): prompt caching, thinking blocks sent back, effort.
+    api: 'anthropic',
     keyEnv: ['ANTHROPIC_API_KEY'],
     keyRequired: true,
     signupUrl: 'https://platform.claude.com/settings/keys',
     freeTier: 'Paid per token (no free tier); only used automatically if router.allowPaid is on',
     kind: 'paid',
     speed: 65,
-    // Anthropic's OpenAI-compatible endpoint. Claude 5 models think by default (the thinking is not sent back
-    // here) and answer 400 to a temperature below 1. Opus 5.5, Sonnet 5.5 and Fable 5.1 also reject a forced
-    // tool_choice, and FreeCode only ever sends "auto".
-    quirks: { requireMaxTokens: true, streamUsage: true, noTemperature: true },
     models: [
-      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', context: 1000000, maxOutput: 128000, quality: 98, speed: 50, reasoning: true, vision: true },
-      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', context: 1000000, maxOutput: 128000, quality: 96, speed: 60, reasoning: true, vision: true },
-      { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', context: 1000000, maxOutput: 128000, quality: 88, speed: 80, reasoning: true, vision: true },
+      // Prices in US dollars per million tokens; cache writes are the 5-minute kind (1.25 times input).
+      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', context: 1000000, maxOutput: 128000, quality: 98, speed: 50, reasoning: true, vision: true, effort: true, price: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 } },
+      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', context: 1000000, maxOutput: 128000, quality: 96, speed: 60, reasoning: true, vision: true, effort: true, price: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 } },
+      { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', context: 1000000, maxOutput: 128000, quality: 88, speed: 80, reasoning: true, vision: true, effort: true, price: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125, above: { tokens: 100000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 } } },
       // Costs 2.5 times as much as Opus 5.5, so auto mode prefers Opus. Pick Fable in the model menu to use it.
-      { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', context: 1000000, maxOutput: 128000, quality: 99, speed: 35, reasoning: true, vision: true, priority: -6 },
+      { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', context: 1000000, maxOutput: 128000, quality: 99, speed: 35, reasoning: true, vision: true, effort: true, priority: -6, price: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 } },
     ],
     discovery: { type: 'none' },
   },

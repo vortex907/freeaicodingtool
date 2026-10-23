@@ -1,4 +1,5 @@
-// A scriptable OpenAI-compatible mock server used by the integration tests.
+// A scriptable mock server used by the integration tests: OpenAI-compatible chat completions, and
+// Anthropic's Messages API (POST .../v1/messages) for the Claude provider.
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -11,7 +12,7 @@ export interface MockCall {
 
 export type MockResponse =
   | { kind: 'text'; text: string; reasoning?: string; finish?: string; /** Stream slowly: pause this long between pieces. */ delayMs?: number }
-  | { kind: 'tools'; text?: string; calls: MockCall[]; omitIndex?: boolean }
+  | { kind: 'tools'; text?: string; calls: MockCall[]; omitIndex?: boolean; /** Anthropic only: a thinking block first. */ reasoning?: string }
   | { kind: 'error'; status: number; body: unknown; headers?: Record<string, string> }
   | { kind: 'json'; status?: number; body: unknown }
   | { kind: 'hang' };
@@ -53,6 +54,7 @@ export class MockServer {
 
   /** Scripted sequence of responses for a provider (the last one repeats). */
   script(provider: string, responses: MockResponse[]): void {
+    this.counters.set(provider, 0);
     this.handlers.set(provider, (_r, i) => responses[Math.min(i, responses.length - 1)]!);
   }
 
@@ -65,7 +67,7 @@ export class MockServer {
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const url = req.url ?? '/';
+    const url = (req.url ?? '/').split('?')[0]!; // the Anthropic SDK adds ?beta=true
     const m = /^\/([^/]+)\/v1(\/.*)$/.exec(url);
     if (!m) {
       res.writeHead(404).end();
@@ -103,6 +105,10 @@ export class MockServer {
     }
     if (r.kind === 'json') {
       res.writeHead(r.status ?? 200, { 'content-type': 'application/json' }).end(JSON.stringify(r.body));
+      return;
+    }
+    if (rest === '/messages') {
+      this.anthropicStream(res, r, idx, String(body.model ?? 'claude'));
       return;
     }
     const id = `chatcmpl-${idx}`;
@@ -152,6 +158,35 @@ export class MockServer {
     }
     send({ id, object: 'chat.completion.chunk', model, choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } });
     res.write('data: [DONE]\n\n');
+    res.end();
+  }
+
+  /** Anthropic's server-sent events for one reply. Thinking blocks carry a signature like the real API. */
+  private anthropicStream(res: http.ServerResponse, r: Extract<MockResponse, { kind: 'text' } | { kind: 'tools' }>, idx: number, model: string): void {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'anthropic-ratelimit-requests-remaining': '49' });
+    const send = (event: string, data: Record<string, unknown>) => res.write(`event: ${event}\ndata: ${JSON.stringify({ type: event, ...data })}\n\n`);
+    send('message_start', {
+      message: { id: `msg_${idx}`, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 40, output_tokens: 1, cache_creation_input_tokens: idx === 0 ? 900 : 60, cache_read_input_tokens: idx === 0 ? 0 : 900 } },
+    });
+    res.write('event: ping\ndata: {"type": "ping"}\n\n');
+    let index = 0;
+    const block = (start: Record<string, unknown>, deltas: Record<string, unknown>[]) => {
+      send('content_block_start', { index, content_block: start });
+      for (const delta of deltas) send('content_block_delta', { index, delta });
+      send('content_block_stop', { index });
+      index++;
+    };
+    if (r.reasoning) block({ type: 'thinking', thinking: '', signature: '' }, [{ type: 'thinking_delta', thinking: r.reasoning }, { type: 'signature_delta', signature: `sig-${idx}` }]);
+    const say = r.kind === 'text' ? r.text : r.text;
+    if (say) block({ type: 'text', text: '' }, (say.match(/[\s\S]{1,7}/g) ?? []).map((t) => ({ type: 'text_delta', text: t })));
+    if (r.kind === 'tools') {
+      r.calls.forEach((c, i) => {
+        const args = typeof c.args === 'string' ? c.args : JSON.stringify(c.args);
+        block({ type: 'tool_use', id: `toolu_${idx}_${i}`, name: c.name, input: {} }, (args.match(/[\s\S]{1,10}/g) ?? []).map((p) => ({ type: 'input_json_delta', partial_json: p })));
+      });
+    }
+    send('message_delta', { delta: { stop_reason: r.kind === 'tools' ? 'tool_use' : r.kind === 'text' && r.finish === 'length' ? 'max_tokens' : 'end_turn', stop_sequence: null }, usage: { output_tokens: 20 } });
+    send('message_stop', {});
     res.end();
   }
 }

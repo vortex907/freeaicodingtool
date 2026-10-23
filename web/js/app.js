@@ -1,5 +1,5 @@
 // FreeCode app: chat UI driven by the local FreeCode engine.
-import { h, clear, icon, iconHtml, escapeHtml, fmtTokens, fmtDuration, timeAgo, dayGroup, debounce } from './dom.js';
+import { h, clear, icon, iconHtml, escapeHtml, fmtTokens, fmtUsd, fmtDuration, timeAgo, dayGroup, debounce } from './dom.js';
 import { api, connectEvents, token } from './api.js';
 import { renderMarkdown, FILE_REF } from './markdown.js';
 import { highlightLine, langFromPath } from './highlight.js';
@@ -1202,6 +1202,15 @@ function renderPending() {
 
 // ---------------------------------------------------------------- composer
 
+// How hard models that take an effort level think (Claude, GPT-5, gpt-oss). Others ignore it.
+const EFFORTS = [
+  { id: 'auto', label: 'Auto', short: 'Effort', desc: 'Each model uses its own default' },
+  { id: 'low', label: 'Low', short: 'Low', desc: 'Faster and cheaper; good for simple tasks' },
+  { id: 'medium', label: 'Medium', short: 'Medium', desc: 'Balanced' },
+  { id: 'high', label: 'High', short: 'High', desc: 'More thinking for hard problems' },
+  { id: 'max', label: 'Max', short: 'Max', desc: 'The most thinking; slowest and costs the most on paid models' },
+];
+
 const MODES = [
   { id: 'default', label: 'Ask before edits', desc: 'Approve every edit and command', icon: 'hand' },
   { id: 'acceptEdits', label: 'Edit automatically', desc: 'Edits are applied, commands still ask', icon: 'pencil' },
@@ -1530,7 +1539,7 @@ function renderComposer() {
     updateComposerMenus(t);
   });
   const modeInfo = MODES.find((m) => m.id === mode) || MODES[0];
-  const modeBtn = h('button', { class: `pill mode-${mode}`, title: 'Permission mode (Shift+Tab)' }, icon(modeInfo.icon, 'svg-sm'), modeInfo.label, icon('chevronDown', 'svg-sm'));
+  const modeBtn = h('button', { class: `pill mode-${mode}`, title: 'Permission mode (Shift+Tab)' }, icon(modeInfo.icon, 'svg-sm'), h('span', { class: 'pill-label' }, modeInfo.label), icon('chevronDown', 'svg-sm'));
   modeBtn.addEventListener('click', () =>
     showMenu(
       modeBtn,
@@ -1540,7 +1549,8 @@ function renderComposer() {
     ),
   );
   const pinned = st.model?.pinned;
-  const modelBtn = h('button', { class: 'pill', title: 'Model' }, h('span', { class: 'dot' }), pinned ? pinned : 'Auto', icon('chevronDown', 'svg-sm'));
+  // The provider is in the tooltip; the pill shows the model.
+  const modelBtn = h('button', { class: 'pill', title: pinned ? `Model: ${pinned}` : 'Model' }, h('span', { class: 'dot' }), h('span', { class: 'pill-label' }, pinned ? pinned.slice(pinned.indexOf('/') + 1) : 'Auto'), icon('chevronDown', 'svg-sm'));
   modelBtn.addEventListener('click', async () => {
     let models = [];
     try {
@@ -1562,6 +1572,17 @@ function renderComposer() {
     ];
     showMenu(modelBtn, items, (it) => api.post('/api/model', { model: it.key }).catch((e) => toast(e.message, 'err')), { title: 'Model', searchable: true });
   });
+  const effort = EFFORTS.find((e) => e.id === (st.effort?.level ?? 'auto')) ?? EFFORTS[0];
+  const effortTip = st.effort?.supported ? 'Thinking effort' : 'Thinking effort (applies to models that support it: Claude, GPT-5, gpt-oss)';
+  const effortBtn = h('button', { class: `pill effort-pill${st.effort?.supported ? '' : ' unsupported'}`, title: effortTip }, icon('zap', 'svg-sm'), h('span', { class: 'pill-label' }, effort.short), icon('chevronDown', 'svg-sm'));
+  effortBtn.addEventListener('click', () =>
+    showMenu(
+      effortBtn,
+      EFFORTS.map((e) => ({ label: e.label, desc: e.desc, id: e.id, checked: e.id === effort.id })),
+      (it) => api.post('/api/command', { name: 'effort', args: it.id }).catch((e) => toast(e.message, 'err')),
+      { title: 'Thinking effort' },
+    ),
+  );
   const sendBtn = h('button', { class: 'send-btn', id: 'send-btn' });
   sendBtn.addEventListener('click', () => {
     const t = $('composer-input');
@@ -1578,7 +1599,7 @@ function renderComposer() {
   });
   const mic = h('button', { class: `icon-btn mic-btn ${recorder ? 'recording' : ''}`, title: 'Speak your request' }, icon('mic'));
   mic.addEventListener('click', () => toggleVoice(mic));
-  bar.append(attach, mic, modeBtn, modelBtn, h('span', { class: 'grow' }), sendBtn);
+  bar.append(attach, mic, modeBtn, modelBtn, effortBtn, h('span', { class: 'grow' }), sendBtn);
   updateSendBtn();
 }
 
@@ -1963,12 +1984,14 @@ function renderPanel() {
         'div',
         { class: 'stat-grid' },
         h('div', { class: 'stat' }, h('div', { class: 'v' }, String(u.requests || 0)), h('div', { class: 'k' }, 'AI requests')),
-        h('div', { class: 'stat' }, h('div', { class: 'v' }, '$0.00'), h('div', { class: 'k' }, 'Cost (free models)')),
+        h('div', { class: 'stat' }, h('div', { class: 'v' }, fmtUsd(u.costUsd || 0)), h('div', { class: 'k' }, u.costUsd ? 'Cost (paid models)' : 'Cost (free models)')),
         h('div', { class: 'stat' }, h('div', { class: 'v' }, fmtTokens(u.promptTokens || 0)), h('div', { class: 'k' }, 'Tokens in')),
         h('div', { class: 'stat' }, h('div', { class: 'v' }, fmtTokens(u.completionTokens || 0)), h('div', { class: 'k' }, 'Tokens out')),
+        u.cacheReadTokens ? h('div', { class: 'stat' }, h('div', { class: 'v' }, fmtTokens(u.cacheReadTokens)), h('div', { class: 'k' }, 'Read from cache')) : null,
+        u.cacheReadTokens ? h('div', { class: 'stat' }, h('div', { class: 'v' }, `${Math.round((100 * u.cacheReadTokens) / Math.max(1, u.promptTokens))}%`), h('div', { class: 'k' }, 'Input from cache')) : null,
       ),
       h('div', { class: 'panel-section-title' }, 'Model pool'),
-      h('div', { class: 'muted', style: { fontSize: '13px' } }, `${st.pool?.models ?? 0} models from ${st.pool?.providers ?? 0} providers. ${st.model?.pinned ? `Pinned: ${st.model.pinned}` : 'Auto routing is on.'}`),
+      h('div', { class: 'muted', style: { fontSize: '13px' } }, `${st.pool?.models ?? 0} models from ${st.pool?.providers ?? 0} provider${st.pool?.providers === 1 ? '' : 's'}. ${st.model?.pinned ? `Pinned: ${st.model.pinned}` : 'Auto routing is on.'}`),
       st.model?.current ? h('div', { class: 'muted', style: { fontSize: '13px', marginTop: '4px' } }, `Last used: ${st.model.current}`) : null,
       h('div', { class: 'panel-section-title' }, 'Shortcuts'),
       h('div', { class: 'faint', style: { fontSize: '12.5px', lineHeight: 1.9 } }, 'Shift+Tab cycle mode · Esc stop · Ctrl/Cmd+K new task · Ctrl/Cmd+B sidebar · Ctrl/Cmd+, settings'),

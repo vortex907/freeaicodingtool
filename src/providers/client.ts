@@ -1,8 +1,9 @@
 // Streaming chat-completions client for OpenAI-compatible APIs (and Ollama's native API).
-import type { ChatMessage, ChatResult, ModelInfo, ProviderRuntime, ToolCall, ToolSchema, ToolMode, Usage } from './types.js';
+import type { ChatMessage, ChatResult, EffortLevel, ModelInfo, ProviderRuntime, ToolCall, ToolSchema, ToolMode, Usage } from './types.js';
 import { ProviderError, classifyHttpError, classifyNetworkError, rateLimitFromHeaders } from './errors.js';
 import { SseParser } from './sse.js';
-import { buildRequestBody, toWireMessages } from './wire.js';
+import { buildRequestBody, openAiEffort, toWireMessages } from './wire.js';
+import { anthropicChat, anthropicModelList } from './anthropic.js';
 import { newToolCallId } from './textTools.js';
 import { anySignal } from '../util/async.js';
 import { debug } from '../util/log.js';
@@ -17,6 +18,10 @@ export interface ChatRequest {
   toolMode: ToolMode;
   maxTokens?: number;
   temperature?: number;
+  /** How hard to think, for models that take an effort level. */
+  effort?: EffortLevel;
+  /** What the request is for; Claude requests for small side jobs think less. */
+  purpose?: string;
   signal?: AbortSignal;
   minimal?: boolean;
   strict?: boolean;
@@ -272,6 +277,7 @@ function errorFromPayload(payload: Record<string, unknown>, req: ChatRequest): P
 /** Sends one chat request and streams the answer. Throws ProviderError on failure. */
 export async function chatCompletion(req: ChatRequest, handlers: StreamHandlers = {}): Promise<ChatResult> {
   if (req.provider.def.api === 'ollama') return ollamaChat(req, handlers);
+  if (req.provider.def.api === 'anthropic') return anthropicChat(req, handlers);
   const started = Date.now();
   const quirks = req.provider.def.quirks ?? {};
   const body = buildRequestBody(req.messages, {
@@ -285,6 +291,7 @@ export async function chatCompletion(req: ChatRequest, handlers: StreamHandlers 
     historyAsText: req.historyAsText,
     maxTokens: req.maxTokens,
     temperature: req.temperature,
+    effort: req.effort,
     stream: req.stream ?? true,
   });
   const url = resolveUrl(req.provider, '/chat/completions');
@@ -486,6 +493,8 @@ async function ollamaChat(req: ChatRequest, handlers: StreamHandlers): Promise<C
   if (req.toolMode === 'native' && req.tools?.length) {
     body.tools = req.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
   }
+  // gpt-oss takes its reasoning level through "think".
+  if (req.effort && req.model.effort) body.think = openAiEffort(req.effort);
   const url = `${ollamaRoot(req.provider)}/api/chat`;
   debug('client', `POST ${url} model=${req.model.id} num_ctx=${req.model.context}`);
   const { res, abort } = await timedFetch(url, { method: 'POST', headers: authHeaders(req.provider, req.apiKey), body: JSON.stringify(body) }, { ...req, headersTimeoutMs: req.headersTimeoutMs ?? 300000 });
@@ -568,6 +577,7 @@ function findToolName(wire: Record<string, unknown>[], id: string): string | und
 
 /** Lists models from an OpenAI-compatible /models endpoint. */
 export async function fetchModelList(provider: ProviderRuntime, apiKey: string, timeoutMs = 8000): Promise<Record<string, unknown>[]> {
+  if (provider.def.api === 'anthropic') return anthropicModelList(provider, apiKey, timeoutMs);
   const url = resolveUrl(provider, '/models');
   const res = await fetch(url, { headers: authHeaders(provider, apiKey), signal: AbortSignal.timeout(timeoutMs) });
   const text = await res.text();

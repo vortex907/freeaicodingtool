@@ -12,6 +12,28 @@ export interface ToolCall {
   extra?: Record<string, unknown>;
 }
 
+/** How hard a reasoning model thinks, for models that take an effort level. */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
+/** US dollars per million tokens. */
+export interface ModelPrice {
+  input: number;
+  output: number;
+  /** Input read from the prompt cache. */
+  cacheRead?: number;
+  /** Input written to the prompt cache. */
+  cacheWrite?: number;
+  /** A second rate card for long prompts (Haiku 5.5 above 100K tokens). */
+  above?: { tokens: number; input: number; output: number; cacheRead?: number; cacheWrite?: number };
+}
+
+/** A model's own reply blocks, kept so they can be sent back unchanged (Claude's thinking blocks). */
+export interface NativeContent {
+  provider: 'anthropic';
+  model: string;
+  content: unknown[];
+}
+
 export interface ImageAttachment {
   mediaType: string;
   /** base64 data */
@@ -44,6 +66,8 @@ export interface ChatMessage {
   toolName?: string;
   reasoning?: string;
   isError?: boolean;
+  /** The provider's exact reply blocks for this assistant turn (sent back unchanged to the same provider). */
+  native?: NativeContent;
   meta?: MessageMeta;
 }
 
@@ -78,6 +102,8 @@ export interface ProviderQuirks {
   noTemperature?: boolean;
   /** Gemini 3: tool calls carry thought signatures (extra_content) that must be sent back. */
   thoughtSignatures?: boolean;
+  /** How the effort level reaches models that take one: `reasoning_effort`, or OpenRouter's `reasoning.effort`. */
+  reasoningEffort?: 'openai' | 'openrouter';
 }
 
 export type ProviderKind = 'free' | 'keyless' | 'local' | 'trial' | 'paid';
@@ -92,6 +118,10 @@ export interface SeedModel {
   speed?: number;
   reasoning?: boolean;
   vision?: boolean;
+  /** Takes an effort level (Claude 5, GPT-5, gpt-oss). */
+  effort?: boolean;
+  /** For paid models: what a request costs. */
+  price?: ModelPrice;
   limits?: RateLimits;
   extraBody?: Record<string, unknown>;
   roles?: ModelRole[];
@@ -133,7 +163,7 @@ export interface ProviderDef {
   name: string;
   /** May contain {accountId}. */
   baseURL: string;
-  api?: 'openai' | 'ollama';
+  api?: 'openai' | 'ollama' | 'anthropic';
   keyEnv: string[];
   keyRequired: boolean;
   /** Key to send when the user has none (keyless providers). */
@@ -172,6 +202,8 @@ export interface ModelInfo {
   speed: number;
   reasoning: boolean;
   vision: boolean;
+  effort: boolean;
+  price?: ModelPrice;
   limits: RateLimits;
   extraBody?: Record<string, unknown>;
   roles: ModelRole[];
@@ -202,9 +234,16 @@ export interface ProviderRuntime {
 }
 
 export interface Usage {
+  /** All input tokens, cached ones included. */
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Input tokens read from the provider's prompt cache (billed at a fraction of the price). */
+  cacheReadTokens?: number;
+  /** Input tokens written to the prompt cache. */
+  cacheWriteTokens?: number;
+  /** What the tokens cost in US dollars (paid models with a known price). */
+  costUsd?: number;
 }
 
 export interface RateLimitSnapshot {
@@ -227,4 +266,5 @@ export interface ChatResult {
   rateLimit?: RateLimitSnapshot;
   latencyMs: number;
   ttftMs?: number;
+  native?: NativeContent;
 }

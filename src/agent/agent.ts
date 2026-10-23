@@ -1,6 +1,7 @@
 // The agent loop: send conversation -> stream the answer -> run requested tools -> repeat until done.
 import * as path from 'node:path';
 import type { ChatMessage, ImageAttachment, ToolCall, Usage } from '../providers/types.js';
+import { requestCost } from '../providers/cost.js';
 import type { PermissionMode, Settings } from '../config/config.js';
 import { updateProjectSettings } from '../config/config.js';
 import { type Candidate, type Router, AllModelsUnavailableError } from '../router/router.js';
@@ -76,6 +77,8 @@ export interface AgentOptions {
   ui: AgentUI;
   /** Returns the system prompt for the next request. */
   systemPrompt: (ctx: { depth: number; mode: PermissionMode; agentType?: string }) => Promise<string>;
+  /** Notes for the start of a user turn, e.g. what changed in the environment since the system prompt was written. */
+  turnNotes?: () => Promise<string | null>;
   /** Pinned model key ("provider/model") or undefined for automatic routing. */
   pinnedModel: () => string | undefined;
   disallowedTools?: string[];
@@ -185,6 +188,9 @@ export class Agent {
 
   /** What the model gets to see (old, large tool outputs trimmed; see leanView). */
   requestView(): ChatMessage[] {
+    // Prompt-cached models (Claude) read an unchanged history at a fraction of the price, while trimming
+    // it rewrites the cache from that point on. They see the conversation as it is until compaction.
+    if (this.opts.router.cachesPrompts(this.opts.pinnedModel() ?? this.currentModelKey)) return this.messages.slice();
     // Token budget follows the task: hard tasks keep more tool output in view, quick ones less.
     const c = this.lastProfile?.complexity;
     const budget = c === 'complex' ? { keepCurrent: 12, maxCurrent: 6000 } : c === 'trivial' || c === 'simple' ? { keepCurrent: 5, maxCurrent: 2500 } : {};
@@ -213,6 +219,8 @@ export class Agent {
           return { text: '', reason: 'denied' };
         }
         if (hook.context.length) content += `\n\n<hook-context>\n${hook.context.join('\n')}\n</hook-context>`;
+        const note = await this.opts.turnNotes?.().catch(() => null);
+        if (note) content += `\n\n${note}`;
         if (asksAboutCurrentInfo(input)) content += `\n\n${LIVE_INFO_REMINDER}`;
         if (isUiWork(input)) content += `\n\n${DESIGN_REMINDER}`;
       }
@@ -262,6 +270,7 @@ export class Agent {
             tools: tools.map(toolSchema),
             profile,
             purpose: this.depth > 0 ? 'subagent' : 'agent',
+            effort: settings.effort && settings.effort !== 'auto' ? settings.effort : undefined,
             signal,
             stickyKey: this.currentModelKey,
             pinned,
@@ -288,9 +297,9 @@ export class Agent {
         this.currentModelKey = result.candidate.model.key;
         this.modelsUsed.set(result.candidate.model.key, (this.modelsUsed.get(result.candidate.model.key) ?? 0) + 1);
         if (result.usage) {
-          this.totalUsage.promptTokens += result.usage.promptTokens;
-          this.totalUsage.completionTokens += result.usage.completionTokens;
-          this.totalUsage.totalTokens += result.usage.totalTokens;
+          const cost = requestCost(result.candidate.model.price, result.usage);
+          if (cost !== undefined) result.usage.costUsd = cost;
+          addUsage(this.totalUsage, result.usage);
           this.emit({ type: 'usage', usage: result.usage, model: result.candidate.model.key });
         }
 
@@ -326,6 +335,7 @@ export class Agent {
           content: text,
           toolCalls: calls.length ? calls : undefined,
           reasoning: result.reasoning || undefined,
+          native: result.native,
           meta: { provider: result.candidate.provider.id, model: result.candidate.model.key, turn: this.turn, ts: Date.now() },
         };
         this.messages.push(assistant);
@@ -665,9 +675,7 @@ export class Agent {
     try {
       const r = await sub.runTurn(prompt);
       this.requestCount += sub.requestCount;
-      this.totalUsage.promptTokens += sub.totalUsage.promptTokens;
-      this.totalUsage.completionTokens += sub.totalUsage.completionTokens;
-      this.totalUsage.totalTokens += sub.totalUsage.totalTokens;
+      addUsage(this.totalUsage, sub.totalUsage);
       if (r.reason === 'aborted') return 'The sub-agent was interrupted.';
       const last = [...sub.messages].reverse().find((m) => m.role === 'assistant' && m.content.trim());
       return last?.content ?? r.text ?? '(no report)';
@@ -689,6 +697,16 @@ export class Agent {
   addContext(content: string, kind: 'bash' | 'memory' | 'command' | 'attachment' = 'command'): void {
     this.messages.push({ role: 'user', content, meta: { synthetic: true, kind, ts: Date.now() } });
   }
+}
+
+/** Adds one request's token counts (cache reads and writes included) to a running total. */
+export function addUsage(total: Usage, u: Usage): void {
+  total.promptTokens += u.promptTokens;
+  total.completionTokens += u.completionTokens;
+  total.totalTokens += u.totalTokens;
+  if (u.cacheReadTokens) total.cacheReadTokens = (total.cacheReadTokens ?? 0) + u.cacheReadTokens;
+  if (u.cacheWriteTokens) total.cacheWriteTokens = (total.cacheWriteTokens ?? 0) + u.cacheWriteTokens;
+  if (u.costUsd) total.costUsd = (total.costUsd ?? 0) + u.costUsd;
 }
 
 /** Keeps stored diff previews small. */

@@ -1,7 +1,7 @@
 // The router: picks the best available free model for each request and fails over automatically
 // when a model is rate limited, out of quota, too small, or broken. Callers never have to switch
 // models by hand.
-import type { ChatMessage, ChatResult, ModelInfo, ProviderRuntime, ToolMode, ToolSchema } from '../providers/types.js';
+import type { ChatMessage, ChatResult, EffortLevel, ModelInfo, ProviderRuntime, ToolMode, ToolSchema } from '../providers/types.js';
 import type { Settings } from '../config/config.js';
 import { ProviderError } from '../providers/errors.js';
 import { chatCompletion, type StreamHandlers } from '../providers/client.js';
@@ -32,6 +32,8 @@ export interface RouteRequest {
   signal?: AbortSignal;
   maxTokens?: number;
   temperature?: number;
+  /** How hard models that take an effort level should think (side jobs default to low). */
+  effort?: EffortLevel;
   /** Model the conversation is currently using; kept unless something better is clearly needed. */
   stickyKey?: string;
   /** Explicit model choice ("provider/model"). */
@@ -116,6 +118,17 @@ export class Router {
   ) {}
 
   /** All enabled (provider, model) pairs. */
+  /** The provider and model behind a "provider/model" key. */
+  lookup(key: string | undefined): { p: ProviderRuntime; m: ModelInfo } | undefined {
+    if (!key) return undefined;
+    return this.allModels().find(({ m }) => m.key === key);
+  }
+
+  /** Requests to this model are prompt-cached, so the conversation should stay append-only. */
+  cachesPrompts(key: string | undefined): boolean {
+    return this.lookup(key)?.p.def.api === 'anthropic';
+  }
+
   allModels(): { p: ProviderRuntime; m: ModelInfo }[] {
     const out: { p: ProviderRuntime; m: ModelInfo }[] = [];
     for (const p of this.providers()) {
@@ -314,6 +327,8 @@ export class Router {
             toolMode,
             maxTokens: this.outputBudget(c, estTokens, req),
             temperature: req.temperature ?? s.temperature,
+            effort: req.effort ?? (req.purpose === 'agent' || req.purpose === 'subagent' ? undefined : 'low'),
+            purpose: req.purpose,
             signal: req.signal,
             minimal,
             strict: minimal,
@@ -402,7 +417,7 @@ export class Router {
 
   private unavailableError(req: RouteRequest, estTokens: number, failures: { key: string; reason: string }[]): AllModelsUnavailableError {
     const s = this.settings();
-    const all = this.allModels().filter(({ p }) => !p.paid || s.router.allowPaid);
+    const all = this.allModels().filter(({ p, m }) => !p.paid || s.router.allowPaid || m.key === req.pinned);
     if (!all.length) {
       return new AllModelsUnavailableError(
         'No AI provider is configured. Run /setup (or `freecode setup`) to add free API keys - Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cerebras and more are free.',
@@ -456,6 +471,8 @@ export class Router {
             toolMode: 'native',
             maxTokens: c.model.reasoning ? 600 : 80,
             temperature: 0,
+            effort: 'low',
+            purpose: 'classify',
             stream: false,
             signal: ctx.signal,
             headersTimeoutMs: 6000,

@@ -22,7 +22,8 @@ import { gitRoot } from './util/git.js';
 import { runHooks } from './agent/hooks.js';
 import { applyIndexSettings, getIndex, indexPromptSection, isCodeIndexEnabled } from './codeindex/index.js';
 import { debug } from './util/log.js';
-import { refreshToolchain } from './util/toolchain.js';
+import { refreshToolchain, toolchainReady } from './util/toolchain.js';
+import { sleep } from './util/async.js';
 
 export interface AppOptions {
   cwd: string;
@@ -53,7 +54,12 @@ export class App {
   customCommands: CustomCommand[] = [];
   pinnedModel: string | undefined;
   sessionAllow = new Set<string>();
-  private envCache: { at: number; cwd: string; text: string } | null = null;
+  /**
+   * The environment and project-profile parts of the system prompt, frozen for the conversation: a prompt
+   * that stays byte-identical keeps prompt caches warm and Claude's thinking blocks valid. What changes
+   * later (git status, the date) is reported at the start of the next turn instead (turnNotes).
+   */
+  private promptParts: { cwd: string; env: string; index: string; reported: string } | null = null;
   discoveryPromise: Promise<DiscoveryReport[]> | null = null;
 
   constructor(public opts: AppOptions) {
@@ -117,6 +123,7 @@ export class App {
       },
       ui,
       systemPrompt: (ctx) => this.systemPrompt(ctx),
+      turnNotes: () => this.turnNotes(),
       pinnedModel: () => this.pinnedModel,
       disallowedTools: (this.opts.disallowedTools ?? []).filter((d) => !d.includes('(')),
       maxSteps: this.opts.maxSteps,
@@ -159,11 +166,34 @@ export class App {
     return this.mcp.start(entries);
   }
 
-  async systemPrompt(ctx: { depth: number; mode: PermissionMode; agentType?: string }): Promise<string> {
+  private async frozenPromptParts(): Promise<{ parts: NonNullable<App['promptParts']>; fresh: boolean }> {
     const cwd = this.session.cwd;
-    if (!this.envCache || this.envCache.cwd !== cwd || Date.now() - this.envCache.at > 60_000) {
-      this.envCache = { at: Date.now(), cwd, text: await environmentSection(this.projectRoot, cwd) };
-    }
+    if (this.promptParts && this.promptParts.cwd === cwd) return { parts: this.promptParts, fresh: false };
+    // The prompt is kept for the whole conversation, so give the tool version lookup a moment to finish.
+    await Promise.race([toolchainReady(), sleep(3000)]);
+    const env = await environmentSection(this.projectRoot, cwd);
+    this.promptParts = { cwd, env, index: indexPromptSection(this.projectRoot), reported: env };
+    return { parts: this.promptParts, fresh: true };
+  }
+
+  /** What changed in the environment since the system prompt was written, for the start of a turn. */
+  async turnNotes(): Promise<string | null> {
+    const { parts, fresh } = await this.frozenPromptParts();
+    if (fresh) return null;
+    // The project profile appears once the code index is ready; it joins the prompt at a turn boundary.
+    if (!parts.index) parts.index = indexPromptSection(this.projectRoot);
+    const now = await environmentSection(this.projectRoot, parts.cwd).catch(() => null);
+    if (!now || now === parts.reported) return null;
+    const before = new Set(parts.reported.split('\n'));
+    const changed = now.split('\n').filter((l) => l.trim() && !before.has(l));
+    parts.reported = now;
+    if (!changed.length) return null;
+    return `<system-reminder>Changes in the environment since the start of this conversation:\n${changed.slice(0, 40).join('\n')}${changed.length > 40 ? '\n...' : ''}</system-reminder>`;
+  }
+
+  async systemPrompt(ctx: { depth: number; mode: PermissionMode; agentType?: string }): Promise<string> {
+    const { parts } = await this.frozenPromptParts();
+    const cwd = parts.cwd;
     return buildSystemPrompt(
       {
         projectRoot: this.projectRoot,
@@ -173,20 +203,25 @@ export class App {
         depth: ctx.depth,
         mcpInstructions: this.mcp.instructions(),
         skillsSection: skillsPromptSection(loadSkillsCached(this.projectRoot)),
-        indexSection: indexPromptSection(this.projectRoot),
+        indexSection: parts.index,
         codeSearch: isCodeIndexEnabled(),
       },
-      this.envCache.text,
+      parts.env,
     );
   }
 
   invalidatePromptCache(): void {
-    this.envCache = null;
+    this.promptParts = null;
   }
 
   async reloadMemory(): Promise<void> {
     this.memory = await loadMemoryFiles(this.projectRoot, this.session.cwd);
     this.customCommands = await loadCustomCommands(this.projectRoot);
+  }
+
+  /** Something can answer: a model in the automatic pool, or a paid model the user picked. */
+  hasUsableModel(): boolean {
+    return this.usableModelCount().models > 0 || !!this.router.lookup(this.pinnedModel);
   }
 
   usableModelCount(): { models: number; providers: number } {
@@ -230,6 +265,7 @@ export class App {
     this.agent.currentModelKey = s.modelKey;
     this.agent.totalUsage = s.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     this.agent.requestCount = s.requests ?? 0;
+    this.promptParts = null;
     this.stopRuntimes();
   }
 
@@ -239,6 +275,7 @@ export class App {
     this.agent.clear();
     this.session.todos = [];
     this.files.reset();
+    this.promptParts = null;
     this.stopRuntimes();
   }
 

@@ -50,6 +50,8 @@ export interface Broadcast {
 const INIT_PROMPT = `Analyze this codebase and create an AGENTS.md file in the project root that will help AI coding agents work in this repository. Include: how to build, run, lint and test (including a single test); code style and conventions actually used; a short architecture overview (important directories, entry points); gotchas and project-specific rules. Keep it concise (about 40-80 lines) and specific; if AGENTS.md or CLAUDE.md already exist, improve AGENTS.md instead of duplicating.`;
 const REVIEW_PROMPT = `Review the current uncommitted changes in this repository (git status and git diff, including untracked files). Look for bugs, logic errors, security problems, missing error handling and tests. Report findings by severity with file:line references and concrete suggestions. Do not modify files.`;
 
+export const EFFORT_LEVELS = ['auto', 'low', 'medium', 'high', 'max'] as const;
+
 export const GUI_COMMANDS: { name: string; description: string; args?: string }[] = [
   { name: 'new', description: 'Start a new task (conversation)' },
   { name: 'compact', description: 'Summarize the conversation to free up context', args: '[focus]' },
@@ -59,6 +61,7 @@ export const GUI_COMMANDS: { name: string; description: string; args?: string }[
   { name: 'commit', description: 'Run the tests, then commit the changes with a good message' },
   { name: 'plan', description: 'Switch to plan mode (plan before editing)' },
   { name: 'model', description: 'Pick a model or "auto"', args: '[auto|provider/model]' },
+  { name: 'effort', description: 'How hard models that support it think (Claude, GPT-5, gpt-oss)', args: '[auto|low|medium|high|max]' },
   { name: 'memory', description: 'Save a note to AGENTS.md', args: '<note>' },
   { name: 'reset-limits', description: 'Forget rate-limit cooldowns and retry every model' },
   { name: 'setup', description: 'Open provider setup' },
@@ -232,6 +235,7 @@ export class Controller {
       busy: this.busy,
       mode: app.session.permissionMode,
       model: { pinned: app.pinnedModel ?? null, current: app.agent.currentModelKey ?? null },
+      effort: { level: app.settings.effort ?? 'auto', supported: !!app.router.lookup(app.pinnedModel ?? app.agent.currentModelKey)?.m.effort },
       pool: app.usableModelCount(),
       usage: { requests: app.agent.requestCount, ...app.agent.totalUsage },
       todos: app.session.todos as Todo[],
@@ -360,7 +364,7 @@ export class Controller {
   }
 
   private async runTurn(text: string, display: string, images: ImageAttachment[] = []): Promise<void> {
-    if (!this.app.usableModelCount().models) {
+    if (!this.app.hasUsableModel()) {
       this.toast('error', 'No AI model is available yet. Open Settings → Providers and add a free API key (Gemini, Groq, OpenRouter, Mistral, NVIDIA...).');
       return;
     }
@@ -489,6 +493,8 @@ export class Controller {
       }
       case 'model':
         return this.setModel(args.trim() || 'auto');
+      case 'effort':
+        return this.setEffort(args.trim().toLowerCase() || 'auto');
       case 'memory': {
         const note = args.replace(/^add\s+/, '').trim();
         if (!note) return { ok: false, error: 'Usage: /memory <note>' };
@@ -523,6 +529,13 @@ export class Controller {
   setMode(mode: PermissionMode): void {
     this.app.session.permissionMode = mode;
     this.pushState();
+  }
+
+  setEffort(level: string): { ok: boolean; error?: string } {
+    if (!EFFORT_LEVELS.includes(level as never)) return { ok: false, error: `Effort is one of ${EFFORT_LEVELS.join(', ')}` };
+    this.updateSettings({ effort: level });
+    this.toast('info', level === 'auto' ? 'Effort: each model decides' : `Effort: ${level}`);
+    return { ok: true };
   }
 
   setModel(model: string): { ok: boolean; error?: string } {
@@ -653,7 +666,7 @@ export class Controller {
   // ------------------------------------------------------------------ settings
 
   updateSettings(patch: Record<string, unknown>): void {
-    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate', 'plainPunctuation', 'index.enabled', 'index.roots'];
+    const allowed = ['router.enabled', 'router.allowPaid', 'router.maxWaitSeconds', 'router.showDecisions', 'router.prefer', 'router.avoid', 'router.strict', 'contextBudget', 'autoCompact', 'maxSteps', 'showReasoning', 'bashTimeoutMs', 'webSearch.provider', 'webSearch.braveApiKey', 'webSearch.tavilyApiKey', 'webSearch.searxngUrl', 'permissions.mode', 'saveSessions', 'model', 'autoUpdate', 'plainPunctuation', 'index.enabled', 'index.roots', 'effort'];
     updateGlobalConfig((g) => {
       for (const [k, v] of Object.entries(patch)) if (allowed.includes(k)) setByPath(g as Record<string, unknown>, k, v);
     });

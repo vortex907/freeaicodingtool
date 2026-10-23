@@ -4,6 +4,7 @@ import { chmodSync } from 'node:fs';
 import { globalPaths, projectPaths } from './paths.js';
 import { loadDotenvFile } from './dotenv.js';
 import { readJsonSync, writeJsonSync } from '../util/fs.js';
+import type { EffortLevel } from '../providers/types.js';
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 export type ToolMode = 'native' | 'text';
@@ -32,6 +33,7 @@ export interface ModelUserConfig {
   speed?: number;
   reasoning?: boolean;
   vision?: boolean;
+  effort?: boolean;
   extraBody?: Record<string, unknown>;
   priority?: number;
   limits?: RateLimits;
@@ -101,6 +103,8 @@ export interface Settings {
   maxSteps: number;
   maxOutputTokens?: number;
   temperature?: number;
+  /** How hard models that take an effort level think: "auto" leaves it to each model. */
+  effort?: 'auto' | EffortLevel;
   permissions: {
     mode: PermissionMode;
     allow: string[];

@@ -390,7 +390,7 @@ async function runPrint(a: CliArgs): Promise<number> {
     const s = a.continueLast ? await latestSession(app.projectRoot) : await loadSession(app.projectRoot, a.resume as string);
     if (s) app.loadSaved(s);
   }
-  if (!app.usableModelCount().models) {
+  if (!app.hasUsableModel()) {
     err('No AI provider is configured. Run `freecode setup` to add free API keys.');
     app.shutdown();
     return 1;
@@ -416,7 +416,7 @@ async function runPrint(a: CliArgs): Promise<number> {
           duration_ms: Date.now() - started,
           usage: app.agent.totalUsage,
           models: Object.fromEntries(app.agent.modelsUsed),
-          total_cost_usd: 0,
+          total_cost_usd: app.agent.totalUsage.costUsd ?? 0,
         },
         null,
         2,

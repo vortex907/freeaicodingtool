@@ -327,13 +327,21 @@ test('models with zero free quota are benched for days', async () => {
   assert.ok(pro?.disabledUntil && pro.disabledUntil - Date.now() > 2 * 24 * 3600_000, 'benched for days');
 });
 
-test('Claude: auto mode skips the paid key, a picked Claude model gets requests it accepts', async () => {
-  const env = setup({ free1: { model: 'free-model', quality: 80 } }, { temperature: 0.2 });
+/** setup() plus the built-in Anthropic provider (its own model list) pointed at the mock. */
+function setupClaude(extra: Record<string, unknown> = {}): Env {
+  const env = setup({ free1: { model: 'free-model', quality: 80 } }, extra);
   const cfgFile = path.join(env.home, 'config.json');
   const cfg = JSON.parse(readFileSync(cfgFile, 'utf8')) as { providers: Record<string, unknown> };
-  // The built-in Anthropic definition with its own model list, only the address points at the mock.
   cfg.providers.anthropic = { baseURL: server.baseURL('anthropic'), apiKey: 'test-key', discover: false };
   writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+  return env;
+}
+
+type Block = { type: string; [k: string]: unknown };
+type AnthropicMessage = { role: string; content: Block[] };
+
+test('Claude: auto mode skips the paid key, a picked Claude model gets a cached Messages API request', async () => {
+  const env = setupClaude({ temperature: 0.2, effort: 'low' });
   server.script('free1', [text('free answer')]);
   const auto = await runCli(env, ['-p', 'say hi']);
   assert.equal(auto.code, 0, auto.stderr);
@@ -345,12 +353,87 @@ test('Claude: auto mode skips the paid key, a picked Claude model gets requests 
   const picked = await runCli(env, ['-p', 'say hi', '--model', 'anthropic/claude-opus-5-5']);
   assert.equal(picked.code, 0, picked.stderr);
   assert.match(picked.stdout, /Claude here/);
-  const body = server.requestsFor('anthropic').at(-1)!.body;
+  const req = server.requestsFor('anthropic').at(-1)!;
+  const body = req.body;
+  assert.equal(req.path, '/messages');
+  // SDK 1.x sends the API key as a bearer token, which the API accepts for keys.
+  assert.equal(req.headers.authorization, 'Bearer test-key');
+  assert.match(String(req.headers['anthropic-beta']), /thinking-binding-controls-2026-08-01/);
   assert.equal(body.model, 'claude-opus-5-5');
-  // Claude 4.7 and later answer 400 to a temperature below 1 and to a forced tool_choice.
-  assert.ok(!('temperature' in body), 'no temperature');
-  assert.ok(!('top_p' in body) && !('top_k' in body));
-  assert.equal(body.tool_choice, 'auto');
-  assert.ok(typeof body.max_tokens === 'number' && body.max_tokens > 0);
-  assert.deepEqual(body.stream_options, { include_usage: true });
+  // Claude 4.7 and later answer 400 to sampling parameters and to a forced tool_choice.
+  for (const k of ['temperature', 'top_p', 'top_k', 'tool_choice']) assert.ok(!(k in body), `no ${k}`);
+  // Two cache breakpoints: after the system prompt (caches tools and system) and at the end of the conversation.
+  assert.deepEqual(body.cache_control, { type: 'ephemeral' });
+  const system = body.system as { text: string; cache_control?: unknown }[];
+  assert.deepEqual(system.at(-1)!.cache_control, { type: 'ephemeral' });
+  assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
+  assert.deepEqual(body.output_config, { effort: 'low' });
+  const tools = body.tools as { name: string; eager_input_streaming?: boolean }[];
+  assert.ok(tools.length > 5 && tools.every((t) => t.eager_input_streaming === true));
+  assert.ok(typeof body.max_tokens === 'number' && (body.max_tokens as number) > 0);
+});
+
+test('Claude: thinking blocks go back unchanged, tool results lead the next turn, cache use is counted', async () => {
+  const env = setupClaude();
+  writeFileSync(path.join(env.project, 'notes.md'), '# notes\nalpha\n');
+  server.script('anthropic', [
+    { kind: 'tools', reasoning: 'Read the notes first.', text: 'Reading it.', calls: [{ name: 'Read', args: { file_path: 'notes.md' } }] },
+    text('The notes say alpha.', { reasoning: 'It says alpha.' }),
+  ]);
+  const before = server.requestsFor('anthropic').length;
+  const r = await runCli(env, ['-p', 'what do my notes say?', '--model', 'anthropic/claude-sonnet-5-5', '--yolo', '--output-format', 'json']);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout) as { result: string; usage: { cacheReadTokens?: number; cacheWriteTokens?: number; promptTokens: number } };
+  assert.match(out.result, /alpha/);
+  const reqs = server.requestsFor('anthropic').slice(before);
+  assert.equal(reqs.length, 2);
+  const msgs = reqs[1]!.body.messages as AnthropicMessage[];
+  const asst = msgs.find((m) => m.role === 'assistant')!;
+  assert.deepEqual(asst.content.map((b) => b.type), ['thinking', 'text', 'tool_use']);
+  assert.deepEqual(asst.content[0], { type: 'thinking', thinking: 'Read the notes first.', signature: 'sig-0' });
+  assert.deepEqual(asst.content[2]!.input, { file_path: 'notes.md' });
+  const next = msgs[msgs.indexOf(asst) + 1]!;
+  assert.equal(next.role, 'user');
+  assert.equal(next.content[0]!.type, 'tool_result');
+  assert.equal(next.content[0]!.tool_use_id, asst.content[2]!.id);
+  assert.match(String(next.content[0]!.content), /alpha/);
+  // The first request must be a prefix of the second one, so the cache written by step 1 is read by step 2.
+  const first = reqs[0]!.body;
+  assert.deepEqual(first.system, reqs[1]!.body.system);
+  assert.deepEqual(first.tools, reqs[1]!.body.tools);
+  assert.deepEqual((first.messages as AnthropicMessage[])[0], msgs[0]);
+  // Usage includes the mock's cache reads and writes (900 written, then 900 read).
+  assert.equal(out.usage.cacheReadTokens, 900);
+  assert.equal(out.usage.cacheWriteTokens, 960);
+});
+
+test('effort reaches models that take one in their own format and no others', async () => {
+  const env = setupBuiltin({ groq: [{ id: 'openai/gpt-oss-120b', quality: 90 }, { id: 'moonshotai/kimi-k2-instruct', quality: 60 }] });
+  const cfgFile = path.join(env.home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgFile, 'utf8')) as { effort?: string; providers: Record<string, { models: { limits?: unknown }[] }> };
+  cfg.effort = 'max';
+  // Groq's real per-minute token caps are smaller than FreeCode's full prompt; lift them for the test.
+  for (const m of cfg.providers.groq!.models) m.limits = { rpm: 1000, rpd: 100000, tpm: 1000000 };
+  writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+  server.script('groq', [text('done')]);
+  // The last request of a run can be the session title; look for the model's own request.
+  const lastFor = (model: string) => server.requestsFor('groq').filter((q) => q.body.model === model).at(-1)!.body;
+  const r = await runCli(env, ['-p', 'hi', '--model', 'groq/openai/gpt-oss-120b']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(lastFor('openai/gpt-oss-120b').reasoning_effort, 'high', 'max is the highest OpenAI-style level');
+  const r2 = await runCli(env, ['-p', 'hi', '--model', 'groq/moonshotai/kimi-k2-instruct']);
+  assert.equal(r2.code, 0, r2.stderr);
+  assert.ok(!('reasoning_effort' in lastFor('moonshotai/kimi-k2-instruct')), 'models without effort get none');
+});
+
+test('a picked paid model works when no free provider is configured', async () => {
+  const env = setup({});
+  const cfgFile = path.join(env.home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgFile, 'utf8')) as { providers: Record<string, unknown> };
+  cfg.providers.anthropic = { baseURL: server.baseURL('anthropic'), apiKey: 'test-key', discover: false };
+  writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+  server.script('anthropic', [text('Only Claude here.')]);
+  const r = await runCli(env, ['-p', 'hi', '--model', 'anthropic/claude-haiku-5-5']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /Only Claude here/);
 });

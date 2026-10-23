@@ -104,6 +104,19 @@ Paid providers (DeepSeek, OpenAI, Anthropic, xAI, Moonshot, Alibaba, Scaleway) a
 
 **Claude models.** With an Anthropic API key (create one at [platform.claude.com](https://platform.claude.com/settings/keys)) the model menu lists Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1. The API is paid per token and has no free tier, and a Claude Pro or Max subscription does not include API usage. To use your subscription instead, open the project in Claude Code from the **Open** menu and sign in there with your Claude account.
 
+FreeCode talks to Claude through Anthropic's Messages API with prompt caching, so in a long task each step pays full price only for what was added since the last step (cached input costs a twentieth of the normal price on Opus 5.5). The system prompt stays the same for the whole conversation and changes in your project are reported at the start of the next request instead, which keeps the cache warm between your messages too. Claude's thinking is sent back unchanged so it keeps its reasoning across tool calls, and the Usage panel shows what the session cost and how much came from the cache.
+
+| Model | Input | Cached input | Output |
+|---|---|---|---|
+| Claude Haiku 5.5 | $0.10 | $0.01 | $0.50 |
+| Claude Sonnet 5.5 | $2 | $0.20 | $10 |
+| Claude Opus 5.5 | $4 | $0.20 | $20 |
+| Claude Fable 5.1 | $10 | $0.25 | $50 |
+
+Prices are per million tokens (Haiku 5.5 costs more above 100K tokens of prompt). In auto mode with paid models allowed, FreeCode uses Haiku for simple tasks and Opus for harder ones; Fable runs only when you pick it.
+
+**Effort.** The **Effort** button next to the model picker (or `/effort low|medium|high|max|auto`) sets how hard models that support it think: Claude 5 models, GPT-5 and gpt-oss (on Groq, Cerebras, OpenRouter and Ollama). Low is faster and cheaper, high and max think longer on hard problems. Auto leaves each model at its own default.
+
 Keys are saved only on your computer, in `~/.freecode/config.json`, readable only by you. You can also set them as environment variables (`GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, …) or in `~/.freecode/.env`.
 
 ## How the router works

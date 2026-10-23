@@ -10,32 +10,34 @@ interface FamilyRule {
   context?: number;
   /** Tool calling is unreliable or unsupported natively. */
   textTools?: boolean;
+  /** Takes an effort level (reasoning_effort, or Claude's output_config.effort). */
+  effort?: boolean;
 }
 
 // Order matters: the first matching rule wins, so specific patterns come first.
 const FAMILY_RULES: FamilyRule[] = [
   // Anthropic (Claude 5 models think by default and have a 1M context window; older ones are listed at 200K)
-  { re: /claude.*fable/i, quality: 99, reasoning: true, context: 1000000, vision: true },
-  { re: /claude.*opus[-.]?[5-9]/i, quality: 98, reasoning: true, context: 1000000, vision: true },
-  { re: /claude.*sonnet[-.]?[5-9]/i, quality: 96, reasoning: true, context: 1000000, vision: true },
-  { re: /claude.*haiku[-.]?[5-9]/i, quality: 88, reasoning: true, context: 1000000, vision: true },
+  { re: /claude.*fable/i, quality: 99, reasoning: true, context: 1000000, vision: true, effort: true },
+  { re: /claude.*opus[-.]?[5-9]/i, quality: 98, reasoning: true, context: 1000000, vision: true, effort: true },
+  { re: /claude.*sonnet[-.]?[5-9]/i, quality: 96, reasoning: true, context: 1000000, vision: true, effort: true },
+  { re: /claude.*haiku[-.]?[5-9]/i, quality: 88, reasoning: true, context: 1000000, vision: true, effort: true },
   { re: /claude.*opus/i, quality: 94, context: 200000, vision: true },
   { re: /claude.*sonnet/i, quality: 92, context: 200000, vision: true },
   { re: /claude.*haiku/i, quality: 80, context: 200000, vision: true },
   { re: /claude/i, quality: 85, context: 200000 },
   // OpenAI
-  { re: /gpt-oss-120b/i, quality: 74, reasoning: true, context: 131072 },
-  { re: /gpt-oss-20b/i, quality: 58, reasoning: true, context: 131072 },
-  { re: /gpt-5[.\d]*-?codex/i, quality: 93, reasoning: true, context: 400000 },
-  { re: /gpt-5[.\d]*-nano/i, quality: 66, reasoning: true, context: 400000 },
-  { re: /gpt-5[.\d]*-mini/i, quality: 84, reasoning: true, context: 400000 },
-  { re: /gpt-5/i, quality: 93, reasoning: true, context: 400000, vision: true },
+  { re: /gpt-oss-120b/i, quality: 74, reasoning: true, context: 131072, effort: true },
+  { re: /gpt-oss-20b/i, quality: 58, reasoning: true, context: 131072, effort: true },
+  { re: /gpt-5[.\d]*-?codex/i, quality: 93, reasoning: true, context: 400000, effort: true },
+  { re: /gpt-5[.\d]*-nano/i, quality: 66, reasoning: true, context: 400000, effort: true },
+  { re: /gpt-5[.\d]*-mini/i, quality: 84, reasoning: true, context: 400000, effort: true },
+  { re: /gpt-5/i, quality: 93, reasoning: true, context: 400000, vision: true, effort: true },
   { re: /gpt-4\.1-nano/i, quality: 52, context: 1047576 },
   { re: /gpt-4\.1-mini/i, quality: 68, context: 1047576 },
   { re: /gpt-4\.1/i, quality: 76, context: 1047576, vision: true },
   { re: /gpt-4o-mini/i, quality: 55, context: 128000 },
   { re: /gpt-4o/i, quality: 68, context: 128000, vision: true },
-  { re: /\bo[34](-mini)?\b/i, quality: 78, reasoning: true, context: 200000 },
+  { re: /\bo[34](-mini)?\b/i, quality: 78, reasoning: true, context: 200000, effort: true },
   // Google
   { re: /gemini-?[3-9][.\d]*-?pro/i, quality: 93, reasoning: true, context: 1048576, vision: true },
   { re: /gemini-?[3-9][.\d]*-?flash-?lite/i, quality: 72, reasoning: true, context: 1048576, vision: true },
@@ -171,6 +173,7 @@ export interface ModelEstimate {
   vision: boolean;
   context: number;
   textTools: boolean;
+  effort: boolean;
 }
 
 /** Estimates model characteristics from its id. */
@@ -187,6 +190,7 @@ export function estimateModel(id: string): ModelEstimate {
         vision: !!r.vision || /vision|-vl\b|-vl-|omni/.test(lower),
         context: r.context ?? 32768,
         textTools: !!r.textTools,
+        effort: !!r.effort,
       };
     }
   }
@@ -211,6 +215,7 @@ export function estimateModel(id: string): ModelEstimate {
     vision: /vision|-vl\b|-vl-|omni/.test(lower),
     context: 32768,
     textTools: params !== null && params < 7,
+    effort: false,
   };
 }
 

@@ -83,6 +83,11 @@ export function refreshToolchain(): Promise<void> {
   return pending;
 }
 
+/** Resolves when a running version lookup is done (at once when none is running). */
+export function toolchainReady(): Promise<void> {
+  return pending ?? Promise.resolve();
+}
+
 /** One line for the prompt, e.g. "node 22.11.0, python 3.12.4 (python), git 2.47.0; not installed: go, rustc". */
 export function toolchainSummary(): string {
   if (!cache || Date.now() - cache.at > 6 * 3600_000) void refreshToolchain();

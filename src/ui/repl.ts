@@ -451,7 +451,7 @@ export class Repl implements ReplApi {
   }
 
   private async runAgentTurn(content: string, images?: { mediaType: string; data: string }[]): Promise<void> {
-    if (!this.app.usableModelCount().models) {
+    if (!this.app.hasUsableModel()) {
       this.error('No AI model is available. Run /setup to add free provider keys (Gemini, Groq, OpenRouter, Mistral, NVIDIA, ...).');
       return;
     }

@@ -442,6 +442,11 @@ kbd { font-size: 11px; padding: 1px 6px; border-radius: 5px; border: 1px solid v
 .pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-soft); background: transparent; border-radius: 20px; padding: 4px 10px; font-size: 12.5px; color: var(--text-2); cursor: pointer; max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pill:hover { background: var(--bg-hover); }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.composer-bar .pill { min-width: 0; flex-shrink: 1; }
+.composer-bar .pill .svg-sm, .composer-bar .pill .dot { flex: none; }
+.composer-bar .pill.effort-pill { flex: none; }
+.pill-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill.effort-pill.unsupported { color: var(--faint); }
 .pill.mode-plan { color: #56b6c2; border-color: rgba(86, 182, 194, .4); }
 .pill.mode-acceptEdits { color: var(--purple); border-color: rgba(196, 156, 255, .4); }
 .pill.mode-bypassPermissions { color: var(--danger); border-color: rgba(240, 113, 120, .45); }

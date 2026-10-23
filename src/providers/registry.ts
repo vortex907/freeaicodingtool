@@ -93,6 +93,8 @@ function buildModel(def: ProviderDef, seed: SeedModel | undefined, disc: Discove
     speed: user?.speed ?? seed?.speed ?? def.speed ?? 50,
     reasoning: user?.reasoning ?? seed?.reasoning ?? est.reasoning,
     vision: user?.vision ?? seed?.vision ?? disc?.vision ?? est.vision,
+    effort: user?.effort ?? seed?.effort ?? est.effort,
+    price: seed?.price,
     limits: { ...(seed?.limits ?? {}), ...(user?.limits ?? {}) },
     extraBody: user?.extraBody ?? seed?.extraBody,
     roles: seed?.roles ?? [],

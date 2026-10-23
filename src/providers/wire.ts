@@ -1,7 +1,7 @@
 // Converts FreeCode's internal conversation into an OpenAI-compatible request body, applying
 // per-provider quirks so the same history works on every provider (and survives failover).
 import { createHash } from 'node:crypto';
-import type { ChatMessage, ModelInfo, ProviderQuirks, ToolSchema, ToolMode } from './types.js';
+import type { ChatMessage, EffortLevel, ModelInfo, ProviderQuirks, ToolSchema, ToolMode } from './types.js';
 import { renderToolCallText, renderToolResultText, textToolInstructions } from './textTools.js';
 
 export interface WireOptions {
@@ -19,7 +19,14 @@ export interface WireOptions {
   historyAsText?: boolean;
   maxTokens?: number;
   temperature?: number;
+  /** Sent to models that take an effort level, in the provider's format. */
+  effort?: EffortLevel;
   stream?: boolean;
+}
+
+/** OpenAI-style APIs know low, medium and high; "max" asks for the most they have. */
+export function openAiEffort(effort: EffortLevel): 'low' | 'medium' | 'high' {
+  return effort === 'max' ? 'high' : effort;
 }
 
 type WireMessage = Record<string, unknown>;
@@ -292,6 +299,10 @@ export function buildRequestBody(messages: ChatMessage[], opts: WireOptions): Re
     body[quirks.maxTokensField ?? 'max_tokens'] = opts.maxTokens;
   }
   if (opts.temperature !== undefined && !minimal && !quirks.noTemperature) body.temperature = opts.temperature;
+  if (opts.effort && !minimal && model.effort && quirks.reasoningEffort) {
+    if (quirks.reasoningEffort === 'openrouter') body.reasoning = { effort: openAiEffort(opts.effort) };
+    else body.reasoning_effort = openAiEffort(opts.effort);
+  }
   if (!minimal) {
     if (quirks.streamUsage && body.stream) body.stream_options = { include_usage: true };
     if (model.extraBody) Object.assign(body, model.extraBody);
