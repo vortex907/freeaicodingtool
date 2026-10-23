@@ -485,7 +485,7 @@ export class Agent {
     }
     // Tool messages can't carry images, so screenshots follow in one message (skipped for text-only models).
     if (images.length) {
-      this.messages.push({ role: 'user', content: images.length > 1 ? 'Screenshots from the Browser calls above.' : 'Screenshot from the Browser call above.', images: images.slice(-2), meta: { synthetic: true, kind: 'screenshot', turn: this.turn } });
+      this.messages.push({ role: 'user', content: images.length > 1 ? 'Images from the tool calls above.' : 'Image from the tool call above.', images: images.slice(-2), meta: { synthetic: true, kind: 'screenshot', turn: this.turn } });
     }
     if (signal.aborted) throw new ProviderError('aborted', 'Aborted');
     return denied ? 'denied' : 'ok';

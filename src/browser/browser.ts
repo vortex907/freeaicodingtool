@@ -515,14 +515,17 @@ function shotsDir(): string {
   return path.join(freecodeHome(), 'screenshots');
 }
 
-/** Saves a screenshot for the UI and returns its file name. Old screenshots are pruned. */
-export function saveScreenshot(buf: Buffer): string {
+const SHOT_TYPES: Record<string, string> = { jpg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+const SHOT_NAME = /^[\w-]+\.(jpg|png|gif|webp)$/;
+
+/** Saves an image for the UI (screenshots, images the agent read) and returns its file name. Old ones are pruned. */
+export function saveScreenshot(buf: Buffer, ext: 'jpg' | 'png' | 'gif' | 'webp' = 'jpg'): string {
   const dir = shotsDir();
   mkdirSync(dir, { recursive: true });
-  const name = `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}.jpg`;
+  const name = `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}.${ext}`;
   writeFileSync(path.join(dir, name), buf);
   try {
-    const files = readdirSync(dir).filter((f) => f.endsWith('.jpg'));
+    const files = readdirSync(dir).filter((f) => SHOT_NAME.test(f));
     if (files.length > 300) {
       const old = files.map((f) => ({ f, t: statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => a.t - b.t);
       for (const o of old.slice(0, files.length - 300)) unlinkSync(path.join(dir, o.f));
@@ -534,7 +537,12 @@ export function saveScreenshot(buf: Buffer): string {
 }
 
 export function screenshotPath(name: string): string | null {
-  return /^[\w-]+\.jpg$/.test(name) ? path.join(shotsDir(), name) : null;
+  return SHOT_NAME.test(name) ? path.join(shotsDir(), name) : null;
+}
+
+/** MIME type for a name returned by saveScreenshot. */
+export function screenshotType(name: string): string {
+  return SHOT_TYPES[name.slice(name.lastIndexOf('.') + 1)] ?? 'application/octet-stream';
 }
 
 // ------------------------------------------------------------------ report text

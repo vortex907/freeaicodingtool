@@ -9,9 +9,12 @@ import { detectShell, isWindows } from '../util/platform.js';
 import { stripAnsi } from '../util/ansi.js';
 import { formatDuration, randomId, truncate, truncateMiddle } from '../util/strings.js';
 import { invalidateFileListCache } from './listFiles.js';
+import { guessServerPort, listeningPortsByTree } from './ports.js';
 
 export const MAX_OUTPUT_FOR_MODEL = 20_000;
 const MAX_CAPTURE = 4 * 1024 * 1024;
+/** stdout kept for parsing (go test -json writes an event per output line). */
+const MAX_STDOUT_CAPTURE = 32 * 1024 * 1024;
 
 const INTERACTIVE: { re: RegExp; hint: string }[] = [
   { re: /^(vim?|nvim|nano|emacs|pico|joe|micro)\b/, hint: 'Text editors are interactive. Use the Edit or Write tools instead.' },
@@ -72,14 +75,31 @@ export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'
   }
 }
 
-interface SpawnResult {
+export interface ProcessResult {
   output: string;
+  /** stdout on its own (only with keepStdout). */
+  stdout: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
   aborted: boolean;
   durationMs: number;
+}
+
+interface SpawnResult extends ProcessResult {
   newCwd?: string;
+}
+
+export interface ProcessOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  signal: AbortSignal;
+  /** Pass the arguments to the program unquoted (cmd.exe). */
+  verbatim?: boolean;
+  /** Also keep stdout apart from stderr, for output that is parsed line by line. */
+  keepStdout?: boolean;
+  onOutput?: (chunk: string) => void;
 }
 
 /**
@@ -95,7 +115,7 @@ export function gitBashPath(bashPath: string, currentPath: string): string {
   return [...missing, ...parts].join(';');
 }
 
-function shellEnv(ctx: ToolContext): NodeJS.ProcessEnv {
+export function shellEnv(ctx: ToolContext): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   const sh = detectShell();
   if (isWindows && sh.kind === 'bash') {
@@ -174,73 +194,90 @@ export function buildInvocation(command: string, cwdFile: string | null): Invoca
   return { file: sh.path, args: ['-c', command + trailer] };
 }
 
-function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutput: (chunk: string) => void): Promise<SpawnResult> {
+/** Appends to a capture buffer, keeping the head and the most recent output once it grows too big. */
+function capture(buf: { text: string; dropped: number }, s: string, max = MAX_CAPTURE): void {
+  if (buf.text.length + s.length > max) {
+    const keepHead = buf.text.slice(0, max / 4);
+    const tail = (buf.text + s).slice(-(max / 2));
+    buf.dropped += buf.text.length + s.length - keepHead.length - tail.length;
+    buf.text = keepHead + `\n[... output truncated ...]\n` + tail;
+  } else buf.text += s;
+}
+
+/** Runs a program, captures its output and kills its whole process tree on timeout or abort. */
+export function runProcess(file: string, args: string[], opts: ProcessOptions): Promise<ProcessResult> {
   return new Promise((resolve) => {
     const started = Date.now();
-    // cmd.exe can't report its final directory, every other shell can.
-    const cwdFile = detectShell().kind === 'cmd' ? null : path.join(os.tmpdir(), `freecode-cwd-${process.pid}-${randomId(6)}`);
-    const { file, args, verbatim, scriptFile } = buildInvocation(command, cwdFile);
-    let cwd = ctx.session.cwd;
-    if (!existsSync(cwd)) cwd = ctx.projectRoot;
     const child = spawn(file, args, {
-      cwd,
-      env: shellEnv(ctx),
+      cwd: opts.cwd,
+      env: opts.env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: !isWindows,
       windowsHide: true,
-      windowsVerbatimArguments: verbatim,
+      windowsVerbatimArguments: opts.verbatim,
     });
-    let output = '';
-    let dropped = 0;
-    const onData = (b: Buffer) => {
+    const all = { text: '', dropped: 0 };
+    const out = { text: '', dropped: 0 };
+    child.stdout?.on('data', (b: Buffer) => {
       const s = b.toString('utf8');
-      if (output.length + s.length > MAX_CAPTURE) {
-        // Keep the head and the most recent output.
-        const keepHead = output.slice(0, MAX_CAPTURE / 4);
-        const tail = (output + s).slice(-(MAX_CAPTURE / 2));
-        dropped += output.length + s.length - keepHead.length - tail.length;
-        output = keepHead + `\n[... output truncated ...]\n` + tail;
-      } else output += s;
-      onOutput(s);
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
+      capture(all, s);
+      if (opts.keepStdout) capture(out, s, MAX_STDOUT_CAPTURE);
+      opts.onOutput?.(s);
+    });
+    child.stderr?.on('data', (b: Buffer) => {
+      const s = b.toString('utf8');
+      capture(all, s);
+      opts.onOutput?.(s);
+    });
     let timedOut = false;
     let aborted = false;
     const timer = setTimeout(() => {
       timedOut = true;
       killTree(child);
       setTimeout(() => killTree(child, 'SIGKILL'), 2000).unref();
-    }, timeoutMs);
+    }, opts.timeoutMs);
     const onAbort = () => {
       aborted = true;
       killTree(child);
       setTimeout(() => killTree(child, 'SIGKILL'), 1500).unref();
     };
-    ctx.signal.addEventListener('abort', onAbort, { once: true });
-    const finish = async (code: number | null, sig: NodeJS.Signals | null) => {
+    opts.signal.addEventListener('abort', onAbort, { once: true });
+    let done = false;
+    const finish = (code: number | null, sig: NodeJS.Signals | null) => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
-      ctx.signal.removeEventListener('abort', onAbort);
-      let newCwd: string | undefined;
-      if (cwdFile) {
-        try {
-          const c = (await fsp.readFile(cwdFile, 'utf8')).trim();
-          if (c && c !== ctx.session.cwd && existsSync(c)) newCwd = c;
-          await fsp.unlink(cwdFile);
-        } catch {
-          // no cwd info
-        }
-      }
-      if (scriptFile) await fsp.unlink(scriptFile).catch(() => undefined);
-      if (dropped) output += `\n[${dropped} bytes of output were dropped]`;
-      resolve({ output, exitCode: code, signal: sig, timedOut, aborted, durationMs: Date.now() - started, newCwd });
+      opts.signal.removeEventListener('abort', onAbort);
+      if (all.dropped) all.text += `\n[${all.dropped} bytes of output were dropped]`;
+      resolve({ output: all.text, stdout: out.text, exitCode: code, signal: sig, timedOut, aborted, durationMs: Date.now() - started });
     };
     child.on('error', (e) => {
-      output += `\n${e.message}`;
-      void finish(127, null);
+      all.text += `\n${e.message}`;
+      finish(127, null);
     });
-    child.on('close', (code, sig) => void finish(code, sig));
+    child.on('close', (code, sig) => finish(code, sig));
   });
+}
+
+async function runCommand(command: string, ctx: ToolContext, timeoutMs: number, onOutput: (chunk: string) => void): Promise<SpawnResult> {
+  // cmd.exe can't report its final directory, every other shell can.
+  const cwdFile = detectShell().kind === 'cmd' ? null : path.join(os.tmpdir(), `freecode-cwd-${process.pid}-${randomId(6)}`);
+  const { file, args, verbatim, scriptFile } = buildInvocation(command, cwdFile);
+  let cwd = ctx.session.cwd;
+  if (!existsSync(cwd)) cwd = ctx.projectRoot;
+  const res = await runProcess(file, args, { cwd, env: shellEnv(ctx), timeoutMs, signal: ctx.signal, verbatim, onOutput });
+  let newCwd: string | undefined;
+  if (cwdFile) {
+    try {
+      const c = (await fsp.readFile(cwdFile, 'utf8')).trim();
+      if (c && c !== ctx.session.cwd && existsSync(c)) newCwd = c;
+      await fsp.unlink(cwdFile);
+    } catch {
+      // no cwd info
+    }
+  }
+  if (scriptFile) await fsp.unlink(scriptFile).catch(() => undefined);
+  return { ...res, newCwd };
 }
 
 function startBackground(command: string, ctx: ToolContext): BackgroundShell {
@@ -258,6 +295,7 @@ function startBackground(command: string, ctx: ToolContext): BackgroundShell {
     id,
     command,
     startedAt: Date.now(),
+    pid: child.pid,
     output: '',
     readOffset: 0,
     exitCode: null,
@@ -277,15 +315,49 @@ function startBackground(command: string, ctx: ToolContext): BackgroundShell {
   child.on('close', (code) => {
     shell.running = false;
     shell.exitCode = code;
+    shell.endedAt ??= Date.now();
     if (scriptFile) void fsp.unlink(scriptFile).catch(() => undefined);
   });
   child.on('error', (e) => {
     shell.output += `\n${e.message}`;
     shell.running = false;
     shell.exitCode = 127;
+    shell.endedAt ??= Date.now();
   });
   ctx.session.shells.set(id, shell);
   return shell;
+}
+
+/** A note when a new dev server would use a port that a running background shell already listens on. */
+async function portClash(command: string, ctx: ToolContext): Promise<string> {
+  const running = [...ctx.session.shells.values()].filter((s) => s.running && s.pid);
+  if (!running.length) return '';
+  const port = guessServerPort(command, ctx.session.cwd);
+  if (!port) return '';
+  const ports = await listeningPortsByTree(running.map((s) => s.pid!)).catch(() => null);
+  const owner = running.find((s) => ports?.get(s.pid!)?.includes(port));
+  if (!owner) return '';
+  return `Port ${port} is already in use by ${owner.id} (${truncate(owner.command.replace(/\s+/g, ' '), 60)}), so this server will probably fail to start or move to another port. Use the running one, or stop it with KillShell first.`;
+}
+
+/** Every background shell with its command, run time, status and the TCP ports its process tree listens on. */
+async function listShells(ctx: ToolContext): Promise<ToolResult> {
+  const shells = [...ctx.session.shells.values()];
+  if (!shells.length) return ok('No background shells. Start one with Bash run_in_background=true.', { kind: 'summary', text: 'No background shells' });
+  const running = shells.filter((s) => s.running && s.pid);
+  const ports = running.length ? await listeningPortsByTree(running.map((s) => s.pid!)).catch(() => null) : new Map<number, number[]>();
+  const lines = shells.map((s) => {
+    const ran = formatDuration((s.endedAt ?? Date.now()) - s.startedAt);
+    let status = s.running ? `running for ${ran}` : `exited with code ${s.exitCode ?? '?'} after ${ran}`;
+    if (s.running) {
+      const p = s.pid ? ports?.get(s.pid) : undefined;
+      status += !ports ? ', ports unknown' : p?.length ? `, listening on port${p.length > 1 ? 's' : ''} ${p.join(', ')}` : ', no listening ports';
+    }
+    return `${s.id}: ${status}\n  $ ${truncate(s.command.replace(/\s+/g, ' '), 200)}`;
+  });
+  const text = lines.join('\n');
+  const count = `${shells.length} background shell${shells.length === 1 ? '' : 's'}`;
+  return ok(`${count}:\n${text}\nRead new output with BashOutput bash_id=<id>; stop a shell with KillShell.`, { kind: 'text', text, maxLines: 8, dim: true });
 }
 
 export const BashTool: Tool = {
@@ -329,10 +401,12 @@ export const BashTool: Tool = {
       },
       execute: async (): Promise<ToolResult> => {
         if (background) {
+          // Checked before starting, so the new process does not count.
+          const clash = await portClash(command, ctx);
           const sh = startBackground(command, ctx);
-          return ok(`Started in background as ${sh.id}. Use BashOutput with bash_id="${sh.id}" to read its output and KillShell to stop it.`, {
+          return ok(`Started in background as ${sh.id}. Use BashOutput with bash_id="${sh.id}" to read its output and KillShell to stop it.${clash ? `\n${clash}` : ''}`, {
             kind: 'summary',
-            text: `Running in background (${sh.id})`,
+            text: clash ? `Running in background (${sh.id}); its port is taken` : `Running in background (${sh.id})`,
           });
         }
         let lastProgress = 0;
@@ -373,19 +447,20 @@ export const BashOutputTool: Tool = {
   category: 'read',
   parallelSafe: true,
   planSafe: true,
-  description: 'Read new output from a background shell started with Bash(run_in_background=true). Returns only output produced since the last read, plus the process status.',
+  description:
+    'Read new output from a background shell started with Bash(run_in_background=true). Returns only output produced since the last read, plus the process status. ' +
+    'Without bash_id it lists every background shell with its command, run time, status and the TCP ports it listens on.',
   parameters: {
     type: 'object',
     properties: {
-      bash_id: { type: 'string', description: 'Id of the background shell (e.g. shell_1)' },
+      bash_id: { type: 'string', description: 'Id of the background shell (e.g. shell_1). Leave it out to list all background shells.' },
       filter: { type: 'string', description: 'Optional regular expression; only matching lines are returned' },
     },
-    required: ['bash_id'],
   },
-  label: (input) => `BashOutput(${strParam(input, 'bash_id', 'shell_id', 'id') ?? '?'})`,
+  label: (input) => `BashOutput(${strParam(input, 'bash_id', 'shell_id', 'id') || 'list shells'})`,
   async prepare(input, ctx) {
     const id = strParam(input, 'bash_id', 'shell_id', 'id');
-    if (!id) return errorResult('Missing required parameter: bash_id');
+    if (!id) return { execute: () => listShells(ctx) };
     const sh = ctx.session.shells.get(id);
     if (!sh) return errorResult(`No background shell with id ${id}. Running shells: ${[...ctx.session.shells.keys()].join(', ') || 'none'}`);
     return {

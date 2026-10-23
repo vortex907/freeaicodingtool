@@ -1,7 +1,9 @@
 // Tool registry.
 import type { Tool } from './types.js';
 import { EditTool, MultiEditTool, ReadTool, WriteTool } from './fileTools.js';
+import { NotebookEditTool } from './notebook.js';
 import { BashOutputTool, BashTool, KillShellTool } from './bash.js';
+import { TestRunTool } from './testRun.js';
 import { GlobTool, GrepTool, LSTool } from './searchTools.js';
 import { WebFetchTool, WebSearchTool } from './webTools.js';
 import { AskUserTool, ExitPlanModeTool, TaskTool, TodoWriteTool } from './metaTools.js';
@@ -19,9 +21,11 @@ export const BUILTIN_TOOLS: Tool[] = [
   EditTool,
   MultiEditTool,
   WriteTool,
+  NotebookEditTool,
   BashTool,
   BashOutputTool,
   KillShellTool,
+  TestRunTool,
   ReplTool,
   DebuggerTool,
   GlobTool,
@@ -57,7 +61,7 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   let tools = [...BUILTIN_TOOLS, ...(opts.extra ?? [])];
   if (opts.depth > 0) {
     const explore = opts.agentType === 'explore';
-    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'CodeSearch', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'TodoWrite', 'REPL', 'Debugger'])]);
+    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'CodeSearch', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'TodoWrite', 'TestRun', 'REPL', 'Debugger'])]);
     tools = tools.filter((t) => allowed.has(t.name) || t.category === 'mcp');
   } else {
     if (!opts.planMode) tools = tools.filter((t) => t.name !== 'ExitPlanMode');
@@ -94,6 +98,8 @@ const ALIASES: Record<string, string> = {
   apply_edit: 'Edit',
   search_replace: 'Edit',
   multi_edit: 'MultiEdit',
+  notebook_edit: 'NotebookEdit',
+  edit_notebook: 'NotebookEdit',
   bash: 'Bash',
   shell: 'Bash',
   run_command: 'Bash',
@@ -101,6 +107,7 @@ const ALIASES: Record<string, string> = {
   execute_command: 'Bash',
   terminal: 'Bash',
   exec: 'Bash',
+  run_tests: 'TestRun',
   glob: 'Glob',
   find_files: 'Glob',
   file_search: 'Glob',
