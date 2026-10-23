@@ -169,6 +169,8 @@ export const SERVER_DEFS: ServerDef[] = [
     find: typescriptServer,
     // tsserver reports syntax errors first and type errors a little later.
     quietMs: 500,
+    // typescript-language-server sends nothing for a file that had no errors and still has none.
+    dedupes: true,
   },
   {
     id: 'python',

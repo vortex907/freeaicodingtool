@@ -18,6 +18,8 @@ export const MAX_SYNC_BYTES = 2 * 1024 * 1024;
 export const MAX_OPEN_DOCS = 40;
 /** A server that skips unchanged diagnostics has nothing new once it was quiet this long. */
 const SETTLE_MS = 1000;
+/** Servers report the work they start (loading a project) a moment after initialize or opening a file. */
+const REPORT_GRACE_MS = 1000;
 
 export interface ServerLaunch {
   /** Program to start (a full path when it was found on PATH). */
@@ -143,6 +145,10 @@ export class LspClient {
   error?: string;
   stderrTail = '';
   lastUsed = Date.now();
+  /** When the initialize handshake finished (0 before). */
+  readyAt = 0;
+  /** When a document was last opened: the server may start loading its project then. */
+  private openedAt = 0;
   /** Called once when the process is gone (crash, failed start or shutdown). */
   onExit?: (client: LspClient) => void;
 
@@ -176,7 +182,7 @@ export class LspClient {
 
   /** Background work in progress (indexing, loading the project, a build). */
   get busy(): boolean {
-    return this.progress.size > 0 || !this.quiescent;
+    return this.progress.size > 0 || !this.quiescent || (this.status === 'ready' && Date.now() - Math.max(this.readyAt, this.openedAt) < REPORT_GRACE_MS);
   }
 
   /** Starts the process and runs the initialize handshake (once). */
@@ -243,7 +249,30 @@ export class LspClient {
     this.notify('initialized', {});
     if (this.status !== 'starting') throw new ServerExitedError(this.describeExit());
     this.status = 'ready';
+    this.readyAt = Date.now();
     debug('lsp', `${label} ready`);
+  }
+
+  /** Waits at most `maxMs` for the background work the server reports (see busy) to finish. */
+  whenIdle(maxMs: number, signal?: AbortSignal): Promise<void> {
+    if (!this.busy || this.status !== 'ready' || maxMs <= 0 || signal?.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        clearInterval(poll);
+        this.listeners.delete(check);
+        signal?.removeEventListener('abort', done);
+        resolve();
+      };
+      const check = () => {
+        if (!this.busy || this.status !== 'ready') done();
+      };
+      const timer = setTimeout(done, maxMs);
+      // The grace after starting or opening a file ends without a message.
+      const poll = setInterval(check, 100);
+      signal?.addEventListener('abort', done, { once: true });
+      this.listeners.add(check);
+    });
   }
 
   // ------------------------------------------------------------------ messages
@@ -474,6 +503,7 @@ export class LspClient {
       doc = { uri: fileUri(file), file, version: 1, text, languageId: this.opts.languageId(file), mtimeMs: st.mtimeMs, size: st.size, lastUsed: Date.now() };
       this.docs.set(key, doc);
       this.notify('textDocument/didOpen', { textDocument: { uri: doc.uri, languageId: doc.languageId, version: doc.version, text } });
+      this.openedAt = Date.now();
       changed = true;
       this.trimDocs(key);
     } else if (doc.text !== text) {

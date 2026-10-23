@@ -10,18 +10,22 @@ import { displayPath } from '../util/fs.js';
 import { escapeRegExp, truncate } from '../util/strings.js';
 import { isAbortError } from '../util/async.js';
 import { getLsp } from '../lsp/index.js';
-import { LspError, RequestTimeoutError, ServerExitedError, type LspClient } from '../lsp/client.js';
+import { LspError, RequestTimeoutError, ServerExitedError, type Doc, type LspClient } from '../lsp/client.js';
 import { applyTextEdits, editsByFile } from '../lsp/edits.js';
 import { fileDiagnosticsReport, hoverText, outline, plural, projectDiagnosticsReport, sourceLine, symbolKind } from '../lsp/format.js';
-import { splitLines, uriToPath, type Diagnostic, type DocumentSymbol, type Hover, type Location, type LocationLink, type Position, type SymbolInformation, type WorkspaceEdit } from '../lsp/protocol.js';
+import { splitLines, uriKey, uriToPath, type Diagnostic, type DocumentSymbol, type Hover, type Location, type LocationLink, type Position, type SymbolInformation, type WorkspaceEdit } from '../lsp/protocol.js';
 
 const ACTIONS = ['definition', 'references', 'hover', 'rename', 'symbols', 'diagnostics'] as const;
 type Action = (typeof ACTIONS)[number];
 
 /** How long a call waits for a server that is starting. */
 const STARTUP_WAIT_MS = 60_000;
+/** For this long after a server started, calls first wait for it to finish loading the project. */
+const LOAD_WINDOW_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_REFERENCE_LINES = 80;
+/** A line that imports a name: a definition answer pointing there stopped at the import. */
+const IMPORT_LINE = /^\s*(import\b|from\s+\S+\s+import\b|export\s*[{*]|use\s|using\s|#\s*include\b)|\brequire\s*\(/;
 
 export function parseAction(raw: string | undefined): Action | null {
   // "textDocument/definition", "find_references", "get_diagnostics", "documentSymbols" ...
@@ -102,6 +106,9 @@ async function locationLines(locs: Location[], client: LspClient, ctx: ToolConte
   return out;
 }
 
+/** Added to an empty answer from a server that is still busy loading or indexing the project. */
+const LOADING = ' The language server is still loading the project, so try again in a moment.';
+
 type Run<T> = { ok: true; value: T; client: LspClient } | { ok: false; result: ToolResult };
 
 /** A mistake in the call (a name not in the file, a line out of range): told to the model as it is. */
@@ -128,10 +135,21 @@ async function onServer<T>(file: string, ctx: ToolContext, fn: (client: LspClien
   }
 }
 
-/** Syncs the file and finds the positions the model means; throws a readable message otherwise. */
-async function openAt(client: LspClient, file: string, input: Record<string, unknown>): Promise<{ uri: string; positions: Position[]; text: string }> {
+/**
+ * Opens or updates `file` in the server. A server that started a short while ago may begin loading the
+ * project only now and answer from part of it meanwhile (an import instead of the definition), so this
+ * waits for that to finish, a while at most.
+ */
+async function syncFile(client: LspClient, file: string, ctx: ToolContext): Promise<{ doc: Doc; changed: boolean }> {
   const synced = await client.sync(file, { save: true });
   if (!synced) throw new Error(`cannot read ${file}`);
+  await client.whenIdle(client.readyAt + LOAD_WINDOW_MS - Date.now(), ctx.signal);
+  return synced;
+}
+
+/** Syncs the file and finds the positions the model means; throws a readable message otherwise. */
+async function openAt(client: LspClient, file: string, input: Record<string, unknown>, ctx: ToolContext): Promise<{ uri: string; positions: Position[]; text: string }> {
+  const synced = await syncFile(client, file, ctx);
   const located = locate(synced.doc.text, { line: numParam(input, 'line', 'line_number', 'row'), column: numParam(input, 'column', 'character', 'col', 'char'), symbol: symbolParam(input) });
   if (typeof located === 'string') throw new UsageError(located);
   return { uri: synced.doc.uri, positions: located, text: synced.doc.text };
@@ -154,23 +172,31 @@ function nameAt(text: string, pos: Position): string {
 
 async function definition(file: string, input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const run = await onServer(file, ctx, async (c) => {
-    const at = await openAt(c, file, input);
+    const at = await openAt(c, file, input, ctx);
+    const ask = async (position: Position) => toLocations(await c.request<Location | Location[] | LocationLink[] | null>('textDocument/definition', { textDocument: { uri: at.uri }, position }, REQUEST_TIMEOUT_MS, ctx.signal));
+    const here = uriKey(at.uri);
+    const lines = splitLines(at.text);
     for (const position of at.positions) {
-      const res = await c.request<Location | Location[] | LocationLink[] | null>('textDocument/definition', { textDocument: { uri: at.uri }, position }, REQUEST_TIMEOUT_MS, ctx.signal);
-      const locs = toLocations(res);
+      let locs = await ask(position);
+      // Only the import of the name in this file (servers do that while loading): follow it once.
+      const first = locs[0];
+      if (first && locs.every((l) => uriKey(l.uri) === here && IMPORT_LINE.test(lines[l.range.start.line] ?? ''))) {
+        const next = (await ask(first.range.start)).filter((l) => uriKey(l.uri) !== here || l.range.start.line !== first.range.start.line);
+        if (next.length) locs = next;
+      }
       if (locs.length) return { name: nameAt(at.text, position), lines: await locationLines(locs, c, ctx, 20), count: locs.length };
     }
     return { name: nameAt(at.text, at.positions[0]!), lines: [], count: 0 };
   });
   if (!run.ok) return run.result;
   const { name, lines, count } = run.value;
-  if (!count) return ok(`${run.client.label} found no definition of ${name}. It may be built in, generated, or defined in a library without sources.`, { kind: 'summary', text: 'No definition found' });
+  if (!count) return ok(`${run.client.label} found no definition of ${name}.${run.client.busy ? LOADING : ' It may be built in, generated, or defined in a library without sources.'}`, { kind: 'summary', text: 'No definition found' });
   return ok(`Definition of ${name}:\n${lines.join('\n')}`, { kind: 'summary', text: count === 1 ? lines[0]!.split('  ')[0]! : `${count} definitions` });
 }
 
 async function references(file: string, input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const run = await onServer(file, ctx, async (c) => {
-    const at = await openAt(c, file, input);
+    const at = await openAt(c, file, input, ctx);
     for (const position of at.positions) {
       const res = await c.request<Location[] | null>('textDocument/references', { textDocument: { uri: at.uri }, position, context: { includeDeclaration: true } }, REQUEST_TIMEOUT_MS, ctx.signal);
       const locs = toLocations(res).sort((a, b) => a.uri.localeCompare(b.uri) || a.range.start.line - b.range.start.line || a.range.start.character - b.range.start.character);
@@ -180,7 +206,7 @@ async function references(file: string, input: Record<string, unknown>, ctx: Too
   });
   if (!run.ok) return run.result;
   const { name, locs, lines } = run.value;
-  if (!locs.length) return ok(`${run.client.label} found no references to ${name}.`, { kind: 'summary', text: 'No references found' });
+  if (!locs.length) return ok(`${run.client.label} found no references to ${name}.${run.client.busy ? LOADING : ''}`, { kind: 'summary', text: 'No references found' });
   const files = new Set(locs.map((l) => l.uri)).size;
   const summary = `${plural(locs.length, 'reference')} in ${plural(files, 'file')}`;
   return ok(`${summary} to ${name} (the definition included):\n${lines.join('\n')}`, { kind: 'summary', text: summary });
@@ -188,7 +214,7 @@ async function references(file: string, input: Record<string, unknown>, ctx: Too
 
 async function hover(file: string, input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const run = await onServer(file, ctx, async (c) => {
-    const at = await openAt(c, file, input);
+    const at = await openAt(c, file, input, ctx);
     for (const position of at.positions) {
       const text = hoverText(await c.request<Hover | null>('textDocument/hover', { textDocument: { uri: at.uri }, position }, REQUEST_TIMEOUT_MS, ctx.signal));
       if (text) return { name: nameAt(at.text, position), position, text };
@@ -198,7 +224,7 @@ async function hover(file: string, input: Record<string, unknown>, ctx: ToolCont
   if (!run.ok) return run.result;
   const { name, position, text } = run.value;
   const where = `${displayPath(file, ctx.session.cwd)}:${position.line + 1}:${position.character + 1}`;
-  if (!text) return ok(`${run.client.label} has no type information for ${name} at ${where}.`, { kind: 'summary', text: 'No information' });
+  if (!text) return ok(`${run.client.label} has no type information for ${name} at ${where}.${run.client.busy ? LOADING : ''}`, { kind: 'summary', text: 'No information' });
   return ok(`${name} at ${where}:\n${truncate(text, 6000)}`, { kind: 'summary', text: truncate(text.replace(/```\w*\n?/g, '').split('\n').find((l) => l.trim()) ?? name, 80) });
 }
 
@@ -221,8 +247,7 @@ async function symbols(file: string | null, input: Record<string, unknown>, ctx:
   const query = strParam(input, 'query', 'q', 'search', 'pattern')?.trim();
   if (file && !query) {
     const run = await onServer(file, ctx, async (c) => {
-      const synced = await c.sync(file, { save: true });
-      if (!synced) throw new Error(`cannot read ${file}`);
+      const synced = await syncFile(c, file, ctx);
       return (await c.request<(DocumentSymbol | SymbolInformation)[] | null>('textDocument/documentSymbol', { textDocument: { uri: synced.doc.uri } }, REQUEST_TIMEOUT_MS, ctx.signal)) ?? [];
     });
     if (!run.ok) return run.result;
@@ -248,7 +273,7 @@ async function symbols(file: string | null, input: Record<string, unknown>, ctx:
     [...clients].map(async ([c, open]) => {
       try {
         // Some servers only know a project once one of its files is open.
-        if (open) await c.sync(open);
+        if (open) await syncFile(c, open, ctx);
         const res = await c.request<SymbolInformation[] | null>('workspace/symbol', { query }, REQUEST_TIMEOUT_MS, ctx.signal);
         for (const s of res ?? []) found.push({ s, label: c.label });
       } catch (e) {
@@ -256,7 +281,7 @@ async function symbols(file: string | null, input: Record<string, unknown>, ctx:
       }
     }),
   );
-  if (!found.length) return errors.length ? fail(`Symbol search failed: ${errors.join('; ')}`) : ok(`No symbols match "${query}".`, { kind: 'summary', text: 'No symbols found' });
+  if (!found.length) return errors.length ? fail(`Symbol search failed: ${errors.join('; ')}`) : ok(`No symbols match "${query}".${[...clients.keys()].some((c) => c.busy) ? LOADING : ''}`, { kind: 'summary', text: 'No symbols found' });
   const q = query.toLowerCase();
   // Exact names first, then prefixes, then the rest; project files before libraries.
   const rank = (s: SymbolInformation) => {
@@ -319,7 +344,7 @@ async function prepareRename(file: string, input: Record<string, unknown>, ctx: 
   const newName = strParam(input, 'new_name', 'newName', 'to', 'new', 'rename_to')?.trim();
   if (!newName) return errorResult('Missing required parameter for rename: new_name');
   const run = await onServer(file, ctx, async (c) => {
-    const at = await openAt(c, file, input);
+    const at = await openAt(c, file, input, ctx);
     const canPrepare = !!(c.capabilities.renameProvider && typeof c.capabilities.renameProvider === 'object' && (c.capabilities.renameProvider as { prepareProvider?: boolean }).prepareProvider);
     for (const position of at.positions) {
       const params = { textDocument: { uri: at.uri }, position };

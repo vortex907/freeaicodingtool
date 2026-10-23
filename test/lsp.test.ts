@@ -218,7 +218,9 @@ test('client: initialize handshake, answers to server requests, request timeouts
   assert.deepEqual(seen['cfg-1000'], [null, null], 'settings requests get the server defaults');
   assert.equal(seen['progress-1'], null);
   assert.equal(seen['unknown-1'].error.code, -32601, 'unknown requests are refused, not left waiting');
-  await until(() => !c.busy);
+  // The server reported progress (indexing) right after starting; whenIdle waits for its end.
+  await c.whenIdle(5000);
+  assert.equal(c.busy, false);
   const started = Date.now();
   await assert.rejects(c.request('fake/hang', {}, 200), RequestTimeoutError);
   assert.ok(Date.now() - started < 2000);
@@ -401,6 +403,10 @@ test('LSP tool: definition, references, hover, symbols and diagnostics', async (
   assert.match((await run({ action: 'definition', file_path: 'gone.fk', symbol: 'x' })).content, /^File not found: /);
   assert.match((await run({ action: 'fly', file_path: 'main.fk' })).content, /^Unknown or missing action\. Use one of: definition, references, hover, rename, symbols, diagnostics\.$/);
   assert.match((await run({ action: 'references' })).content, /^Missing required parameter for references: file_path$/);
+  // An answer that only points at the import of the name is followed to the definition.
+  const other = project({ 'lib.fk': 'def greet\n', 'imp.fk': 'import greet\ngreet here\n' });
+  const followed = await toolContext(other).run({ action: 'definition', file_path: 'imp.fk', symbol: 'greet', line: 2 });
+  assert.equal(followed.content, 'Definition of greet:\nlib.fk:1:5  def greet');
 });
 
 test('LSP tool: rename asks like Edit, changes every file and can be undone', async () => {

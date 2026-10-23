@@ -2,6 +2,8 @@
 //   def NAME       defines NAME (one per line, indented defs are children of the def above)
 //   use NAME       an error "Unknown name NAME" unless some .fk file in the folder defines it
 //   ERROR: text    an error on that line; WARN: text a warning
+//   import NAME    the definition of a use of NAME in this file is this line (like a server that is
+//                  still loading the project); asked on this line, it is the def
 // Every word is a reference to the def of the same name. Hovering the word "crash" kills the server,
 // hovering "config" returns what the client answered to the server's own requests.
 // initializationOptions: { pull?: true } (pull diagnostics instead of push), { dedupe?: true } (skip
@@ -200,8 +202,17 @@ function handle(msg: Msg): void {
       return reply(msg.id, { kind: 'full', items: diagnose(uri!) });
     case 'textDocument/definition': {
       const w = at();
-      const defs = w ? definitions().get(w.word) ?? [] : [];
-      return reply(msg.id, defs.map((d) => ({ uri: d.uri, range: d.range })));
+      if (!w) return reply(msg.id, []);
+      const lines = (files().get(uri!) ?? '').split('\n');
+      const imp = lines.findIndex((l) => new RegExp(`^import\\s+${w.word}\\b`).test(l));
+      if (imp >= 0 && imp !== pos!.line) {
+        const character = lines[imp]!.indexOf(w.word, 6);
+        return reply(msg.id, [{ uri, range: { start: { line: imp, character }, end: { line: imp, character: character + w.word.length } } }]);
+      }
+      return reply(
+        msg.id,
+        (definitions().get(w.word) ?? []).map((d) => ({ uri: d.uri, range: d.range })),
+      );
     }
     case 'textDocument/references': {
       const w = at();
