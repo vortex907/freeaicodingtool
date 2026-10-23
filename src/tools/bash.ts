@@ -9,6 +9,7 @@ import { detectShell, isWindows } from '../util/platform.js';
 import { stripAnsi } from '../util/ansi.js';
 import { formatDuration, randomId, truncate, truncateMiddle } from '../util/strings.js';
 import { invalidateFileListCache } from './listFiles.js';
+import { guessServerPort, listeningPortsByTree } from './ports.js';
 
 export const MAX_OUTPUT_FOR_MODEL = 20_000;
 const MAX_CAPTURE = 4 * 1024 * 1024;
@@ -258,6 +259,7 @@ function startBackground(command: string, ctx: ToolContext): BackgroundShell {
     id,
     command,
     startedAt: Date.now(),
+    pid: child.pid,
     output: '',
     readOffset: 0,
     exitCode: null,
@@ -277,15 +279,49 @@ function startBackground(command: string, ctx: ToolContext): BackgroundShell {
   child.on('close', (code) => {
     shell.running = false;
     shell.exitCode = code;
+    shell.endedAt ??= Date.now();
     if (scriptFile) void fsp.unlink(scriptFile).catch(() => undefined);
   });
   child.on('error', (e) => {
     shell.output += `\n${e.message}`;
     shell.running = false;
     shell.exitCode = 127;
+    shell.endedAt ??= Date.now();
   });
   ctx.session.shells.set(id, shell);
   return shell;
+}
+
+/** A note when a new dev server would use a port that a running background shell already listens on. */
+async function portClash(command: string, ctx: ToolContext): Promise<string> {
+  const running = [...ctx.session.shells.values()].filter((s) => s.running && s.pid);
+  if (!running.length) return '';
+  const port = guessServerPort(command, ctx.session.cwd);
+  if (!port) return '';
+  const ports = await listeningPortsByTree(running.map((s) => s.pid!)).catch(() => null);
+  const owner = running.find((s) => ports?.get(s.pid!)?.includes(port));
+  if (!owner) return '';
+  return `Port ${port} is already in use by ${owner.id} (${truncate(owner.command.replace(/\s+/g, ' '), 60)}), so this server will probably fail to start or move to another port. Use the running one, or stop it with KillShell first.`;
+}
+
+/** Every background shell with its command, run time, status and the TCP ports its process tree listens on. */
+async function listShells(ctx: ToolContext): Promise<ToolResult> {
+  const shells = [...ctx.session.shells.values()];
+  if (!shells.length) return ok('No background shells. Start one with Bash run_in_background=true.', { kind: 'summary', text: 'No background shells' });
+  const running = shells.filter((s) => s.running && s.pid);
+  const ports = running.length ? await listeningPortsByTree(running.map((s) => s.pid!)).catch(() => null) : new Map<number, number[]>();
+  const lines = shells.map((s) => {
+    const ran = formatDuration((s.endedAt ?? Date.now()) - s.startedAt);
+    let status = s.running ? `running for ${ran}` : `exited with code ${s.exitCode ?? '?'} after ${ran}`;
+    if (s.running) {
+      const p = s.pid ? ports?.get(s.pid) : undefined;
+      status += !ports ? ', ports unknown' : p?.length ? `, listening on port${p.length > 1 ? 's' : ''} ${p.join(', ')}` : ', no listening ports';
+    }
+    return `${s.id}: ${status}\n  $ ${truncate(s.command.replace(/\s+/g, ' '), 200)}`;
+  });
+  const text = lines.join('\n');
+  const count = `${shells.length} background shell${shells.length === 1 ? '' : 's'}`;
+  return ok(`${count}:\n${text}\nRead new output with BashOutput bash_id=<id>; stop a shell with KillShell.`, { kind: 'text', text, maxLines: 8, dim: true });
 }
 
 export const BashTool: Tool = {
@@ -329,10 +365,12 @@ export const BashTool: Tool = {
       },
       execute: async (): Promise<ToolResult> => {
         if (background) {
+          // Checked before starting, so the new process does not count.
+          const clash = await portClash(command, ctx);
           const sh = startBackground(command, ctx);
-          return ok(`Started in background as ${sh.id}. Use BashOutput with bash_id="${sh.id}" to read its output and KillShell to stop it.`, {
+          return ok(`Started in background as ${sh.id}. Use BashOutput with bash_id="${sh.id}" to read its output and KillShell to stop it.${clash ? `\n${clash}` : ''}`, {
             kind: 'summary',
-            text: `Running in background (${sh.id})`,
+            text: clash ? `Running in background (${sh.id}); its port is taken` : `Running in background (${sh.id})`,
           });
         }
         let lastProgress = 0;
@@ -373,19 +411,20 @@ export const BashOutputTool: Tool = {
   category: 'read',
   parallelSafe: true,
   planSafe: true,
-  description: 'Read new output from a background shell started with Bash(run_in_background=true). Returns only output produced since the last read, plus the process status.',
+  description:
+    'Read new output from a background shell started with Bash(run_in_background=true). Returns only output produced since the last read, plus the process status. ' +
+    'Without bash_id it lists every background shell with its command, run time, status and the TCP ports it listens on.',
   parameters: {
     type: 'object',
     properties: {
-      bash_id: { type: 'string', description: 'Id of the background shell (e.g. shell_1)' },
+      bash_id: { type: 'string', description: 'Id of the background shell (e.g. shell_1). Leave it out to list all background shells.' },
       filter: { type: 'string', description: 'Optional regular expression; only matching lines are returned' },
     },
-    required: ['bash_id'],
   },
-  label: (input) => `BashOutput(${strParam(input, 'bash_id', 'shell_id', 'id') ?? '?'})`,
+  label: (input) => `BashOutput(${strParam(input, 'bash_id', 'shell_id', 'id') || 'list shells'})`,
   async prepare(input, ctx) {
     const id = strParam(input, 'bash_id', 'shell_id', 'id');
-    if (!id) return errorResult('Missing required parameter: bash_id');
+    if (!id) return { execute: () => listShells(ctx) };
     const sh = ctx.session.shells.get(id);
     if (!sh) return errorResult(`No background shell with id ${id}. Running shells: ${[...ctx.session.shells.keys()].join(', ') || 'none'}`);
     return {

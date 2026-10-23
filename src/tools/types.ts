@@ -79,6 +79,10 @@ export interface BackgroundShell {
   id: string;
   command: string;
   startedAt: number;
+  /** When the process exited. */
+  endedAt?: number;
+  /** Process id of the shell (the root of the process tree whose ports are listed). */
+  pid?: number;
   output: string;
   readOffset: number;
   exitCode: number | null;
