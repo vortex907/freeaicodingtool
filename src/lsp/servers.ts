@@ -436,7 +436,10 @@ export function mergeOptions(...layers: unknown[]): unknown {
   return out;
 }
 
-/** True when `p` lies in the server's folder or the project (symbolic links followed). */
+/**
+ * True when `p` lies in the server's folder or the project (symbolic links followed). A folder that holds
+ * the home folder (FreeCode opened in ~) is no boundary: everything the user installed would be in it.
+ */
 function insideProject(p: string, root: string, projectRoot: string): boolean {
   const real = (x: string) => {
     try {
@@ -445,7 +448,8 @@ function insideProject(p: string, root: string, projectRoot: string): boolean {
       return path.resolve(x);
     }
   };
-  return [root, projectRoot].some((r) => isInside(path.resolve(p), path.resolve(r)) || isInside(real(p), real(r)));
+  const home = path.resolve(os.homedir());
+  return [root, projectRoot].filter((r) => !isInside(home, path.resolve(r))).some((r) => isInside(path.resolve(p), path.resolve(r)) || isInside(real(p), real(r)));
 }
 
 function hasMarker(dir: string, markers: string[]): boolean {

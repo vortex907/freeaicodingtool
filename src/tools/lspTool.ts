@@ -445,6 +445,7 @@ export const LspTool: Tool = {
     'rename (renames a symbol everywhere, other files included; give new_name). ' +
     'Point at a symbol with file_path plus symbol (its name; add line when the name occurs more than once), or plus line and column (1-based, as Read shows them). ' +
     'Works for TypeScript/JavaScript, Python, Rust, Go, C/C++, C#, shell and PHP when their language server is installed; otherwise it says what to install. ' +
+    'A server that would run code from the project (C#) asks the user before it starts. ' +
     'Errors after Edit and Write are reported automatically; use diagnostics to check other files.',
   parameters: {
     type: 'object',

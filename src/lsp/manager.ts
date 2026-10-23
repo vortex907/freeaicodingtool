@@ -89,7 +89,7 @@ export function startPermission(def: ServerDef, launch: ServerLaunch): Permissio
 export function notStartedMessage(req: PermissionRequest): string {
   const rule = req.ruleSuggestion ?? 'LSP';
   const what = req.ruleLabel ?? 'The language server';
-  return `${what[0]!.toUpperCase()}${what.slice(1)} was not started: ${req.subject} It starts once you allow it for this project: answer yes when FreeCode asks, or add the permission rule ${rule} (Settings → Permissions, permissions.allow in .freecode/settings.json, or --allowedTools "${rule}").`;
+  return `${what[0]!.toUpperCase()}${what.slice(1)} was not started: ${req.subject} It starts once you allow it for this project: answer yes when FreeCode asks, or add the permission rule ${rule} (Settings → Permissions in the app, /permissions allow ${rule} in the terminal, or --allowedTools "${rule}" with -p).`;
 }
 
 const approvalKey = (projectRoot: string, serverId: string) => `${pathKey(projectRoot)}|${canonicalServerId(serverId)}`;

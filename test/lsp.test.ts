@@ -726,6 +726,18 @@ test('pyright, pylsp, clangd and gopls start as they are, unless the program is 
   const inside = withPath(path.join(dir, 'tools'), () => resolveServer(SERVER_DEFS.find((d) => d.id === 'go')!, dir, undefined, true));
   assert.ok(inside.ok);
   assert.match(inside.launch.runsProjectCode ?? '', /^is a program inside the project folder \(tools[\\/]gopls/);
+  // FreeCode opened in the home folder: the tools the user installed there are not the project's code.
+  const home = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  Object.assign(process.env, { HOME: dir, USERPROFILE: dir });
+  try {
+    const own = withPath(path.join(dir, 'tools'), () => resolveServer(SERVER_DEFS.find((d) => d.id === 'go')!, dir, undefined, true));
+    assert.ok(own.ok && own.launch.runsProjectCode === undefined);
+  } finally {
+    for (const [k, v] of Object.entries(home)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });
 
 test('C#: diagnostics after edits start the server only with the rule LSP(csharp) or in bypass mode', async () => {

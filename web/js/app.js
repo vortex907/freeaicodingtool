@@ -919,9 +919,9 @@ function permissionCard(p) {
   let title;
   let ico;
   if (r.category === 'execute') {
-    // REPL, Debugger and Desktop explain themselves ("Run Python code", "Control a desktop app").
+    // REPL, Debugger, LSP and Desktop explain themselves ("Run Python code", "Start the C# language server for this project").
     title = r.tool === 'Bash' || !r.title ? 'Run this command?' : `${r.title}?`;
-    ico = r.tool === 'Desktop' ? 'eye' : r.tool === 'REPL' || r.tool === 'Debugger' ? 'code' : 'terminal';
+    ico = r.tool === 'Desktop' ? 'eye' : r.tool === 'REPL' || r.tool === 'Debugger' || r.tool === 'LSP' ? 'code' : 'terminal';
   } else if (r.category === 'edit') {
     title = r.title === 'Create file' ? 'Create this file?' : 'Make this edit?';
     ico = 'pencil';
