@@ -8,9 +8,10 @@ export const isMac = process.platform === 'darwin';
 
 const whichCache = new Map<string, string | null>();
 
-/** Finds an executable on PATH (like `which`). `fresh` looks again instead of using the cached answer. */
-export function which(cmd: string, opts: { fresh?: boolean } = {}): string | null {
-  if (!opts.fresh && whichCache.has(cmd)) return whichCache.get(cmd)!;
+/** Finds an executable on PATH (like `which`). `fresh` looks again (something may have been installed since). */
+export function which(cmd: string, opts: { fresh?: boolean } | boolean = {}): string | null {
+  const fresh = typeof opts === 'boolean' ? opts : !!opts.fresh;
+  if (!fresh && whichCache.has(cmd)) return whichCache.get(cmd)!;
   const exts = isWindows ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
   const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
   let found: string | null = null;
