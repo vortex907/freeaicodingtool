@@ -8,6 +8,7 @@ import { discoverProvider, normalizeModelEntry } from '../src/providers/discover
 import { getProviderDef, setupOrder } from '../src/providers/catalog.js';
 import { buildProviders } from '../src/providers/registry.js';
 import { estimateModel } from '../src/providers/modelInfo.js';
+import { checkKey } from '../src/providers/validate.js';
 import { defaultSettings } from '../src/config/config.js';
 import type { ProviderRuntime } from '../src/providers/types.js';
 
@@ -66,6 +67,27 @@ test('Ollama Cloud discovery sends the key, keeps the strongest models and their
     // Ollama names gpt-oss with a colon; it still reasons and takes an effort level.
     assert.equal(estimateModel('gpt-oss:120b').effort, true);
     assert.equal(estimateModel('gpt-oss:20b').reasoning, true);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('an Ollama Cloud key is checked with a one-word reply, not with the local Ollama check', async () => {
+  const urls: string[] = [];
+  const srv = await serve((req) => {
+    urls.push(req.url ?? '');
+    if (req.headers.authorization !== 'Bearer olm_good') return { status: 401, json: { error: 'unauthorized' } };
+    return { json: { model: 'gpt-oss:120b', message: { role: 'assistant', content: 'OK' }, done: true, done_reason: 'stop', prompt_eval_count: 9, eval_count: 1 } };
+  });
+  try {
+    const def = getProviderDef('ollamacloud')!;
+    const good = await checkKey(def, 'olm_good', { baseURL: srv.url });
+    assert.equal(good.ok, true, good.message);
+    const bad = await checkKey(def, 'olm_bad', { baseURL: srv.url });
+    assert.equal(bad.ok, false);
+    assert.match(bad.message, /rejected/);
+    assert.ok(!/ollama serve|is running/i.test(good.message + bad.message), 'no local-server wording');
+    assert.deepEqual(urls, ['/api/chat', '/api/chat']);
   } finally {
     await srv.close();
   }

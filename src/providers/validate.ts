@@ -56,7 +56,7 @@ export async function checkKey(def: ProviderDef, key: string, opts: { accountId?
       return describe(e);
     }
   }
-  if (def.api === 'ollama') {
+  if (def.api === 'ollama' && def.kind === 'local') {
     try {
       const root = rt.baseURL.replace(/\/v1$/, '');
       const res = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(3000) });
@@ -66,13 +66,16 @@ export async function checkKey(def: ProviderDef, key: string, opts: { accountId?
       return { ok: false, message: 'Ollama is not running (start it with `ollama serve`).' };
     }
   }
-  try {
-    const list = await fetchModelList(rt, key, 10000);
-    if (list.length) return { ok: true, message: `Key works (${list.length} models available).`, models: list.length };
-  } catch (e) {
-    const err = e as ProviderError;
-    if (err instanceof ProviderError && (err.kind === 'auth' || err.status === 401 || err.status === 403)) return describe(e);
-    // Some providers have no /models endpoint: fall through to a tiny chat request.
+  // Ollama Cloud lists its models to anyone, so only the tiny chat request below shows whether the key works.
+  if (def.api !== 'ollama') {
+    try {
+      const list = await fetchModelList(rt, key, 10000);
+      if (list.length) return { ok: true, message: `Key works (${list.length} models available).`, models: list.length };
+    } catch (e) {
+      const err = e as ProviderError;
+      if (err instanceof ProviderError && (err.kind === 'auth' || err.status === 401 || err.status === 403)) return describe(e);
+      // Some providers have no /models endpoint: fall through to a tiny chat request.
+    }
   }
   const seed = def.models[0];
   if (!seed) return { ok: true, message: 'Saved (this provider has no cheap way to verify keys).' };
