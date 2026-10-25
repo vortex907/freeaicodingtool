@@ -586,8 +586,9 @@ test('server detection: languages by extension, settings keys, overrides and Win
 
 test('a language server installed as a .cmd shim starts on Windows', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
   const dir = project({ 'a.fk': 'use nothing\n' });
-  // A space in the path, like "Program Files".
-  const shim = path.join(dir, 'fake server.cmd');
+  // Outside the project (a program inside it needs approval first), with spaces in the path like "Program Files".
+  const shim = path.join(project({}), 'Program Files', 'fake server.cmd');
+  mkdirSync(path.dirname(shim));
   writeFileSync(shim, `@echo off\r\n"${process.execPath}" "${FAKE}" %*\r\n`);
   const m = manager({ servers: { fake: { command: shim, args: ['--stdio'], extensions: ['.fk'] } } });
   assert.match((await m.afterEdit([path.join(dir, 'a.fk')], dir))[0] ?? '', /^fake server found 1 error in a\.fk/);
