@@ -335,6 +335,21 @@ export const PROVIDERS: ProviderDef[] = [
     discovery: { type: 'openai', filter: (m) => (/free|big-pickle/i.test(m.id) || m.free === true) && isChatModelId(m.id), limit: 15 },
   },
   {
+    id: 'requesty',
+    name: 'Requesty (free models)',
+    baseURL: 'https://router.requesty.ai/v1',
+    keyEnv: ['REQUESTY_API_KEY'],
+    keyRequired: true,
+    signupUrl: 'https://www.requesty.ai',
+    freeTier: 'Free models (NVIDIA Nemotron, Gemma and others) after sign-up: 50 requests a day for new accounts, 200 for paying ones',
+    kind: 'free',
+    speed: 50,
+    limits: { rpd: 50 },
+    models: [],
+    // Only models the API lists at a price of zero, so a key with credits never pays for FreeCode's traffic.
+    discovery: { type: 'openai', freeOnly: true, filter: goodEnough(45), limit: 12 },
+  },
+  {
     id: 'chutes',
     name: 'Chutes',
     baseURL: 'https://llm.chutes.ai/v1',
@@ -380,6 +395,43 @@ export const PROVIDERS: ProviderDef[] = [
       { id: 'qwen-coder', name: 'Pollinations Qwen Coder', context: 32768, maxOutput: 8192, quality: 48, speed: 35, tools: 'text' },
     ],
     discovery: { type: 'none' },
+  },
+  {
+    id: 'ovhcloud',
+    name: 'OVHcloud AI Endpoints (no signup)',
+    baseURL: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1',
+    // Used without a key on purpose: an OVHcloud key lifts the limit but is billed per token.
+    keyEnv: [],
+    keyRequired: false,
+    anonymousKey: '',
+    signupUrl: 'https://endpoints.ai.cloud.ovh.net',
+    freeTier: 'Works without any key: 2 requests per minute for each model (gpt-oss, Qwen, Llama, Mistral)',
+    kind: 'keyless',
+    speed: 45,
+    quirks: { reasoningEffort: 'openai' },
+    models: [
+      { id: 'gpt-oss-120b', context: 131072, maxOutput: 16384, quality: 74, speed: 50, reasoning: true, effort: true, limits: { rpm: 2 } },
+      { id: 'Qwen3-Coder-30B-A3B-Instruct', context: 262144, maxOutput: 16384, quality: 72, speed: 60, limits: { rpm: 2 } },
+      { id: 'Meta-Llama-3_3-70B-Instruct', context: 131072, maxOutput: 8192, quality: 62, speed: 45, limits: { rpm: 2 } },
+      { id: 'Qwen3-32B', context: 32768, maxOutput: 8192, quality: 66, speed: 45, reasoning: true, limits: { rpm: 2 } },
+      { id: 'Mistral-Small-3.2-24B-Instruct-2506', context: 131072, maxOutput: 8192, quality: 60, speed: 55, vision: true, limits: { rpm: 2 } },
+    ],
+    discovery: { type: 'openai', public: true, filter: goodEnough(55), limit: 10 },
+  },
+  {
+    id: 'ollamacloud',
+    name: 'Ollama Cloud',
+    // Ollama's own API on ollama.com (the one local Ollama speaks), with an API key.
+    baseURL: 'https://ollama.com',
+    api: 'ollama',
+    keyEnv: ['OLLAMA_CLOUD_API_KEY', 'OLLAMA_API_KEY'],
+    keyRequired: true,
+    signupUrl: 'https://ollama.com/settings/keys',
+    freeTier: 'A free account includes limited use of large cloud models (gpt-oss, DeepSeek, Kimi, Qwen and more); the allowance refills over time',
+    kind: 'free',
+    speed: 60,
+    models: [{ id: 'gpt-oss:120b', context: 131072, maxOutput: 32768, quality: 74, speed: 60, reasoning: true, effort: true }],
+    discovery: { type: 'ollama', limit: 15, minQuality: 55 },
   },
   // ---------------------------------------------------------------- local
   {
@@ -538,6 +590,6 @@ export function getProviderDef(id: string): ProviderDef | undefined {
 
 /** Providers shown in the setup wizard, most useful first. */
 export function setupOrder(): ProviderDef[] {
-  const order = ['gemini', 'groq', 'openrouter', 'mistral', 'nvidia', 'cerebras', 'cohere', 'zai', 'sambanova', 'cloudflare', 'kilo', 'opencode', 'huggingface', 'vercel', 'together', 'siliconflow', 'bigmodel', 'chutes', 'llm7', 'pollinations', 'ollama', 'lmstudio', 'dashscope', 'scaleway', 'deepseek', 'openai', 'anthropic', 'xai', 'moonshot'];
+  const order = ['gemini', 'groq', 'openrouter', 'mistral', 'nvidia', 'cerebras', 'ollamacloud', 'cohere', 'zai', 'sambanova', 'cloudflare', 'kilo', 'opencode', 'requesty', 'huggingface', 'vercel', 'together', 'siliconflow', 'bigmodel', 'chutes', 'llm7', 'pollinations', 'ovhcloud', 'ollama', 'lmstudio', 'dashscope', 'scaleway', 'deepseek', 'openai', 'anthropic', 'xai', 'moonshot'];
   return [...PROVIDERS].sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 }

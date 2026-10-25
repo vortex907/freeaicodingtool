@@ -26,8 +26,8 @@ const FAMILY_RULES: FamilyRule[] = [
   { re: /claude.*haiku/i, quality: 80, context: 200000, vision: true },
   { re: /claude/i, quality: 85, context: 200000 },
   // OpenAI
-  { re: /gpt-oss-120b/i, quality: 74, reasoning: true, context: 131072, effort: true },
-  { re: /gpt-oss-20b/i, quality: 58, reasoning: true, context: 131072, effort: true },
+  { re: /gpt-oss[-:]120b/i, quality: 74, reasoning: true, context: 131072, effort: true },
+  { re: /gpt-oss[-:]20b/i, quality: 58, reasoning: true, context: 131072, effort: true },
   { re: /gpt-5[.\d]*-?codex/i, quality: 93, reasoning: true, context: 400000, effort: true },
   { re: /gpt-5[.\d]*-nano/i, quality: 66, reasoning: true, context: 400000, effort: true },
   { re: /gpt-5[.\d]*-mini/i, quality: 84, reasoning: true, context: 400000, effort: true },

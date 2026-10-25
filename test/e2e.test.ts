@@ -7,6 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MockServer, rateLimited, text, tools } from './helpers/mockServer.js';
+import { PROVIDERS } from '../src/providers/catalog.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.resolve(here, '../../bin/freecode.js');
@@ -47,9 +48,7 @@ function setup(providers: Record<string, { model: string; quality: number; tools
     ...extra,
   };
   // Disable every built-in provider so only the mock ones are used.
-  for (const id of ['gemini', 'openrouter', 'groq', 'cerebras', 'mistral', 'nvidia', 'cohere', 'zai', 'bigmodel', 'cloudflare', 'sambanova', 'huggingface', 'together', 'siliconflow', 'vercel', 'kilo', 'opencode', 'chutes', 'llm7', 'pollinations', 'ollama', 'lmstudio', 'dashscope', 'scaleway', 'deepseek', 'openai', 'anthropic', 'xai', 'moonshot']) {
-    (cfg.providers as Record<string, unknown>)[id] = { enabled: false };
-  }
+  for (const p of PROVIDERS) (cfg.providers as Record<string, unknown>)[p.id] = { enabled: false };
   mkdirSync(home, { recursive: true });
   writeFileSync(path.join(home, 'config.json'), JSON.stringify(cfg, null, 2));
   return { home, project };

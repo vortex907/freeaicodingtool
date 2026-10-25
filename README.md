@@ -1,6 +1,6 @@
 # FreeCode
 
-**A free AI coding agent with a desktop app, built in the spirit of Claude Code.** FreeCode pools the free tiers of about 20 AI providers (Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cerebras, Cohere, Z.ai, Cloudflare and more). A small router AI picks the best available model for each task. When a model hits its rate limit or runs out of free quota, FreeCode switches to the next one automatically, so you never have to switch by hand.
+**A free AI coding agent with a desktop app, built in the spirit of Claude Code.** FreeCode pools the free tiers of more than 20 AI providers (Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cerebras, Cohere, Z.ai, Cloudflare and more). A small router AI picks the best available model for each task. When a model hits its rate limit or runs out of free quota, FreeCode switches to the next one automatically, so you never have to switch by hand.
 
 ![FreeCode app](docs/app.png)
 
@@ -94,11 +94,13 @@ The first time FreeCode opens, it lists the free providers. For each one you wan
 | Mistral | Free "Experiment" plan, including Codestral/Devstral | [console.mistral.ai](https://console.mistral.ai/api-keys) |
 | NVIDIA NIM | Free hosted open models (Kimi, Qwen, DeepSeek, Llama, …) | [build.nvidia.com](https://build.nvidia.com/settings/api-keys) |
 | Cerebras | Free tier with very fast inference | [cloud.cerebras.ai](https://cloud.cerebras.ai) |
+| Ollama Cloud | Limited free use of large cloud models (gpt-oss, DeepSeek, Kimi, Qwen and more), refills over time | [ollama.com/settings/keys](https://ollama.com/settings/keys) |
 | Cohere | Free trial key | [dashboard.cohere.com](https://dashboard.cohere.com/api-keys) |
 | Z.ai (GLM) | Free GLM Flash models | [z.ai](https://z.ai/manage-apikey/apikey-list) |
 | Cloudflare Workers AI | Daily free allowance | [dash.cloudflare.com](https://dash.cloudflare.com/profile/api-tokens) |
 | SambaNova, Hugging Face, Together, SiliconFlow, Vercel AI Gateway, Kilo, OpenCode Zen, Chutes | Free models or monthly credits | listed in the app |
-| LLM7.io, Pollinations | **No signup needed** (used automatically) | not needed |
+| Requesty | Free models only (Nemotron, Gemma and others), 50 requests a day for new accounts | [requesty.ai](https://www.requesty.ai) |
+| LLM7.io, Pollinations, OVHcloud AI Endpoints | **No signup needed** (used automatically; OVHcloud allows 2 requests a minute per model) | not needed |
 | Ollama, LM Studio | Local models on your own computer | [ollama.com](https://ollama.com/download) |
 
 Paid providers (DeepSeek, OpenAI, Anthropic, xAI, Moonshot, Alibaba, Scaleway) are supported too. Auto mode only uses them if you turn on `router.allowPaid`, but once a key is saved you can always pick one of their models in the model menu.
@@ -116,7 +118,7 @@ FreeCode talks to Claude through Anthropic's Messages API with prompt caching, s
 
 Prices are per million tokens (Haiku 5.5 costs more above 100K tokens of prompt). In auto mode with paid models allowed, FreeCode uses Haiku for simple tasks and Opus for harder ones; Fable runs only when you pick it.
 
-**Effort.** The **Effort** button next to the model picker (or `/effort low|medium|high|max|auto`) sets how hard models that support it think: Claude 5 models, GPT-5 and gpt-oss (on Groq, Cerebras, OpenRouter and Ollama). Low is faster and cheaper, high and max think longer on hard problems. Auto leaves each model at its own default.
+**Effort.** The **Effort** button next to the model picker (or `/effort low|medium|high|max|auto`) sets how hard models that support it think: Claude 5 models, GPT-5 and gpt-oss (on Groq, Cerebras, OpenRouter, OVHcloud, Ollama and Ollama Cloud). Low is faster and cheaper, high and max think longer on hard problems. Auto leaves each model at its own default.
 
 Keys are saved only on your computer, in `~/.freecode/config.json`, readable only by you. You can also set them as environment variables (`GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, …) or in `~/.freecode/.env`.
 

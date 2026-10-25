@@ -42,31 +42,37 @@ export function normalizeModelEntry(raw: Record<string, unknown>, stripPrefix?: 
   if (arch?.input_modalities) vision = arch.input_modalities.includes('image');
   if (arch?.output_modalities && !arch.output_modalities.includes('text')) return null;
   if (caps.completion_chat === false) return null;
+  // OpenRouter-style "pricing": { prompt, completion } or flat input_price / output_price fields.
   const pricing = raw.pricing as Record<string, unknown> | undefined;
+  const inPrice = pricing ? (pricing.prompt ?? pricing.input) : raw.input_price;
+  const outPrice = pricing ? (pricing.completion ?? pricing.output) : raw.output_price;
   let free: boolean | undefined;
-  if (pricing) {
-    const p = Number(pricing.prompt ?? pricing.input ?? NaN);
-    const c = Number(pricing.completion ?? pricing.output ?? NaN);
-    free = p === 0 && c === 0;
-  }
+  if (inPrice !== undefined || outPrice !== undefined) free = Number(inPrice ?? NaN) === 0 && Number(outPrice ?? NaN) === 0;
   if (id.endsWith(':free')) free = true;
   const deprecated = !!(raw.deprecation || raw.deprecated || raw.deprecation_date);
   return { id, name: typeof raw.name === 'string' && raw.name !== id ? String(raw.name) : undefined, context, maxOutput, tools, vision, free, deprecated };
 }
 
 async function discoverOllama(p: ProviderRuntime): Promise<DiscoveredModel[]> {
-  const root = p.baseURL.replace(/\/v1$/, '');
-  const tags = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(2500) });
+  const root = p.baseURL.replace(/\/+$/, '').replace(/\/v1$/, '');
+  // Ollama Cloud (ollama.com) needs the key and reports each model's real context; local servers answer fast.
+  const cloud = p.kind !== 'local';
+  const headers: Record<string, string> = cloud && p.apiKeys[0] ? { Authorization: `Bearer ${p.apiKeys[0]}` } : {};
+  const tags = await fetch(`${root}/api/tags`, { headers, signal: AbortSignal.timeout(cloud ? 10000 : 2500) });
   if (!tags.ok) throw new Error(`Ollama /api/tags HTTP ${tags.status}`);
   const json = (await tags.json()) as { models?: { name: string; details?: { parameter_size?: string } }[] };
-  const names = (json.models ?? []).map((m) => m.name).filter((n) => isChatModelId(n));
+  let names = (json.models ?? []).map((m) => m.name).filter((n) => isChatModelId(n));
+  // A cloud catalog is long: keep the strongest models that pass the bar, not the first ones listed.
+  const min = p.def.discovery?.minQuality;
+  if (min) names = names.filter((n) => estimateModel(n).quality >= min);
+  if (cloud) names.sort((a, b) => estimateModel(b).quality - estimateModel(a).quality);
   const localCtx = Number(process.env.FREECODE_OLLAMA_CONTEXT || 32768);
   return mapLimit(names.slice(0, p.def.discovery?.limit ?? 30), 4, async (name) => {
     let tools: boolean | undefined;
     let vision: boolean | undefined;
     let context = localCtx;
     try {
-      const show = await fetch(`${root}/api/show`, { method: 'POST', body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(4000) });
+      const show = await fetch(`${root}/api/show`, { method: 'POST', headers, body: JSON.stringify({ model: name }), signal: AbortSignal.timeout(cloud ? 10000 : 4000) });
       if (show.ok) {
         const info = (await show.json()) as { capabilities?: string[]; model_info?: Record<string, unknown> };
         if (Array.isArray(info.capabilities)) {
@@ -75,12 +81,12 @@ async function discoverOllama(p: ProviderRuntime): Promise<DiscoveredModel[]> {
         }
         const ctxKey = Object.keys(info.model_info ?? {}).find((k) => k.endsWith('.context_length'));
         const trained = ctxKey ? Number(info.model_info![ctxKey]) : undefined;
-        if (trained && trained > 0) context = Math.min(trained, localCtx);
+        if (trained && trained > 0) context = cloud ? trained : Math.min(trained, localCtx);
       }
     } catch {
       // keep defaults
     }
-    return { id: name, context, tools, vision, maxOutput: Math.min(8192, Math.floor(context / 2)) };
+    return { id: name, context, tools, vision, maxOutput: cloud ? Math.min(32768, Math.floor(context / 4)) : Math.min(8192, Math.floor(context / 2)) };
   });
 }
 
