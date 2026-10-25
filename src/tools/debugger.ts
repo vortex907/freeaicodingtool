@@ -454,8 +454,8 @@ async function prepareAttach(attach: AttachTarget, program: string | undefined, 
   const backend = await attachBackend(adapter === 'auto' && attach.port !== undefined ? 'debugpy' : adapter, program);
   if ('error' in backend) return errorResult(backend.error);
   const { spec } = backend;
-  if (attach.port !== undefined && spec.kind !== 'python') {
-    return errorResult(`port works with debugpy (a Python program started with python -m debugpy --listen <port>). Attach ${spec.name} with pid.`);
+  if (attach.port !== undefined && !spec.attachByPort) {
+    return errorResult(`port works with debugpy (python -m debugpy --listen <port>) and dlv (dlv --headless --listen=:<port>). Attach ${spec.name} with pid.`);
   }
   const where = attach.port !== undefined ? `${attach.host || '127.0.0.1'}:${attach.port}` : `process ${attach.pid}`;
   return {
@@ -628,7 +628,7 @@ export const DebuggerTool: Tool = {
     'Debug a program: pause it at breakpoints, step through it and read variables to see where it goes wrong. ' +
     'Python runs under debugpy (pdb when debugpy is missing), JavaScript under node inspect, C, C++, Rust and Swift executables under lldb-dap, C# under netcoredbg (start the built .dll) and Go under Delve (start a .go file or package folder). ' +
     'action=start runs `program` (with `args`, `cwd`) and pauses at its start, or runs to the first of `breakpoints` (file:line) when given. ' +
-    'start with `pid` (or `port` for debugpy) attaches to a process that is already running; stop then detaches and leaves it running. ' +
+    'start with `pid` attaches to a process that is already running, `port` to a program started with python -m debugpy --listen or dlv --headless; stop then detaches and leaves it running. ' +
     'Then: break (`location` file:line or a function name, optional `condition`), clear, continue, next (step over), step_in, step_out, pause, stack, vars (variables of `frame`, nested values `depth` levels deep), eval (`expression`), threads and stop. ' +
     'Each stop shows the location, the source around it and the top frames. send types a raw debugger `command` (pdb or node inspect syntax, or the debug console of the adapter); send with no command waits for a running program to stop. ' +
     'One session at a time: start again to restart. Build native programs with debug info first (cc -g, cargo build, dotnet build); compile TypeScript and debug the .js output.\n' +
@@ -641,7 +641,7 @@ export const DebuggerTool: Tool = {
       args: { type: 'array', items: { type: 'string' }, description: 'Program arguments, for start' },
       cwd: { type: 'string', description: 'Working directory of the program, for start (default: the current folder)' },
       pid: { type: 'number', description: 'For start: attach to this running process instead of starting a program (give adapter, or program for the language)' },
-      port: { type: 'string', description: 'For start: attach debugpy to a Python program started with python -m debugpy --listen <port> (a port or host:port)' },
+      port: { type: 'string', description: 'For start: attach to a program started with python -m debugpy --listen <port>, or dlv --headless --listen=:<port> with adapter dlv (a port or host:port)' },
       adapter: { type: 'string', enum: ['auto', 'debugpy', 'pdb', 'node', 'lldb-dap', 'netcoredbg', 'dlv'], description: 'Debugger to use, for start (default: picked from the program)' },
       breakpoints: { type: 'array', items: { type: 'string' }, description: 'file:line breakpoints to set before the program runs, for start' },
       location: { type: 'string', description: 'file:line or a function name, for break and clear (clear without it removes all)' },

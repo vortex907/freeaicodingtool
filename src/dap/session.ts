@@ -245,9 +245,18 @@ export class DapSession {
     this.disposed = true;
     if (!this.closed && !this.ending) {
       this.ending = true;
+      if (this.attached) await this.release();
       await this.client.request('disconnect', { terminateDebuggee: !this.attached, restart: false }, 2000).catch(() => undefined);
     }
     this.finish();
+  }
+
+  /** Lets an attached program run on without the debugger: dlv --headless keeps breakpoints and leaves a paused program paused. */
+  private async release(): Promise<void> {
+    const cleared = [...this.lineBreakpoints.keys()].map((file) => this.client.request('setBreakpoints', { source: { path: file, name: path.basename(file) }, breakpoints: [] }, 2000));
+    if (this.functionBreakpoints.length) cleared.push(this.client.request('setFunctionBreakpoints', { breakpoints: [] }, 2000));
+    await Promise.allSettled(cleared);
+    if (!this.running && this.threadId != null) await this.client.request('continue', { threadId: this.threadId }, 2000).catch(() => undefined);
   }
 
   private armIdle(): void {

@@ -2,8 +2,9 @@
 // test/helpers/fakeDap.ts; the last one uses the real debugpy and is skipped when it is not installed.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,7 +47,7 @@ const fakeSpec = (name: string, transport: 'stdio' | 'tcp'): AdapterSpec => ({
   attachArgs: (a) => ({ processId: a.pid, program: a.program, args: [] }),
 });
 registerAdapter('fake', fakeSpec('fake', 'stdio'));
-registerAdapter('fake-tcp', fakeSpec('fake-tcp', 'tcp'));
+registerAdapter('fake-tcp', { ...fakeSpec('fake-tcp', 'tcp'), attachByPort: true });
 writeFileSync(path.join(dir, 'calc.fake'), FAKE_PROGRAM);
 
 after(() => stopDebugSession(session));
@@ -345,11 +346,51 @@ test('Debugger over DAP: attach to a running process, then detach', async () => 
   assert.equal((await call({ action: 'break', location: 'calc.fake:7' })).content, 'Breakpoint set at calc.fake:7.');
   assert.match((await call({ action: 'continue' })).content, /Hit breakpoint at calc\.fake:7 in main/);
   assert.match((await call({ action: 'stop' })).content, /Debugger detached\. The program keeps running\.$/);
-  assert.equal(requests().at(-1)!.arguments.terminateDebuggee, false, 'an attached process is not killed');
+  const detach = requests().slice(-3);
+  assert.deepEqual(
+    detach.map((m) => m.command),
+    ['setBreakpoints', 'continue', 'disconnect'],
+    'the attached program is left running and without our breakpoints (dlv --headless keeps both otherwise)',
+  );
+  assert.deepEqual(detach[0]!.arguments.breakpoints, []);
+  assert.equal(detach[2]!.arguments.terminateDebuggee, false, 'an attached process is not killed');
 
   assert.match((await DebuggerTool.prepare({ action: 'start', port: 5678, adapter: 'fake' }, ctx)).error?.content ?? '', /^port works with debugpy/);
   assert.match((await DebuggerTool.prepare({ action: 'start', pid: 1, adapter: 'pdb' }, ctx)).error?.content ?? '', /^Attaching works with debugpy, lldb-dap, netcoredbg and dlv/);
   assert.match((await DebuggerTool.prepare({ action: 'start', pid: -3, adapter: 'fake' }, ctx)).error?.content ?? '', /^pid must be the id of a running process/);
+});
+
+test('Debugger over DAP: attach on a port to the adapter a program started itself', async () => {
+  clearLog();
+  // Like python -m debugpy --listen: the adapter is already running and listening.
+  const server = spawn(process.execPath, [FAKE, '--tcp'], { env: { ...process.env, FAKE_DAP_LOG: logFile }, stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    let printed = '';
+    server.stdout!.setEncoding('utf8');
+    server.stdout!.on('data', (s: string) => (printed += s));
+    await waitFor(() => /listening at: 127\.0\.0\.1:\d+\n/.test(printed));
+    const port = Number(/:(\d+)\n/.exec(printed)![1]);
+    const prep = await DebuggerTool.prepare({ action: 'start', port: String(port), adapter: 'fake-tcp', program: 'calc.fake' }, ctx);
+    assert.equal(prep.permission?.subject, `fake-tcp attach to 127.0.0.1:${port}`);
+    const r = await prep.execute();
+    assert.equal(r.content, `Attached fake-tcp to 127.0.0.1:${port}.\nThe program is running. Set breakpoints with break, then use continue to wait for one to hit, or pause to break in.`);
+    assert.equal(received().filter((m) => m.started).length, 1, 'no second adapter was started');
+    assert.ok(requests().some((m) => m.command === 'attach'));
+    assert.match((await call({ action: 'pause' })).content, /^Paused at calc\.fake:7 in main\n/);
+    assert.match((await call({ action: 'stop' })).content, /^Debugger detached\. The program keeps running\.$/);
+    assert.equal(requests().at(-1)!.command, 'disconnect');
+    assert.equal(requests().at(-1)!.arguments.terminateDebuggee, false);
+  } finally {
+    server.kill();
+  }
+
+  const unused = net.createServer();
+  await new Promise<void>((resolve) => unused.listen(0, '127.0.0.1', resolve));
+  const closedPort = (unused.address() as net.AddressInfo).port;
+  await new Promise((resolve) => unused.close(resolve));
+  const refused = await call({ action: 'start', port: closedPort, adapter: 'fake-tcp' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content, /^Could not connect to 127\.0\.0\.1:\d+ \(.*ECONNREFUSED.*\)\. Is the program listening there\?$/);
 });
 
 test('Debugger over DAP: a launch the adapter refuses and an adapter that dies are reported', async () => {
