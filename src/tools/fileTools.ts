@@ -178,12 +178,8 @@ export const ReadTool: Tool = {
         if (st.size > MAX_READ_BYTES && offset === 1 && !limitRaw) {
           return fail(`File is too large to read at once (${formatBytes(st.size)}). Use offset and limit to read part of it, or Grep to search it.`);
         }
-        // Re-reading the same unchanged lines moments later only costs tokens: point back to them instead.
         const range = `${offset}:${limitRaw ?? ''}:${end ?? ''}`;
         const seq = ctx.session.toolSeq ?? 0;
-        if (ctx.files.shownRecently(abs, range, seq)) {
-          return ok(`<system-note>${abs} has not changed since you read these lines a few steps ago; that result is still above. Use it instead of reading again.</system-note>`, { kind: 'summary', text: 'Unchanged since the last read' });
-        }
         const buf = await fsp.readFile(abs);
         if (isBinaryBuffer(buf)) {
           // Images and PDFs with an unusual name still get read as what they are.
@@ -194,7 +190,9 @@ export const ReadTool: Tool = {
         let text = buf.toString('utf8');
         if (ext === '.ipynb') text = renderNotebook(text);
         ctx.files.recordRead(abs);
-        ctx.files.recordView(abs, range, seq);
+        // Always return the content (an earlier copy may no longer be in view), but stop a model that keeps
+        // reading the same unchanged lines.
+        const times = ctx.files.recordView(abs, range, seq);
         // Files are read before they are edited: start the language server now so the edit is checked at once.
         warmUpLanguageServer(abs, ctx.projectRoot, (req) => ctx.services.permit?.(req).action === 'allow');
         if (!text.length) return ok(`<system-note>The file ${abs} exists but is empty.</system-note>`, { kind: 'summary', text: 'Read 0 lines (empty file)' });
@@ -222,6 +220,7 @@ export const ReadTool: Tool = {
         if (lastShown < total) {
           note = `\n\n<system-note>Showing lines ${offset}-${lastShown} of ${total}${truncatedByChars ? ' (output size limit)' : ''}. Use offset=${lastShown + 1} to continue reading.</system-note>`;
         }
+        if (times >= 3) note += `\n\n<system-note>You have now read these lines ${times} times in this task and the file has not changed. Work from this content from here on; do not read it again unless it changes.</system-note>`;
         const summary = offset === 1 && lastShown >= total ? `Read ${total} line${total === 1 ? '' : 's'}` : `Read lines ${offset}-${lastShown} of ${total}`;
         return ok(body + note, { kind: 'summary', text: summary });
       },

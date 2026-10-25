@@ -43,27 +43,22 @@ export class FileTracker {
     }
   }
 
-  private views = new Map<string, { range: string; seq: number; turn: number; mtimeMs: number; size: number }>();
+  private views = new Map<string, { range: string; seq: number; turn: number; mtimeMs: number; size: number; count: number }>();
 
-  /** Remembers that a range of a file was shown to the model at tool step `seq`. */
-  recordView(absPath: string, range: string, seq: number): void {
+  /**
+   * Remembers that a range of a file was shown to the model at tool step `seq`. Returns how many times in a
+   * row this turn the same lines were shown with the file unchanged (1 for a first or changed read).
+   */
+  recordView(absPath: string, range: string, seq: number): number {
     try {
       const st = statSync(absPath);
-      this.views.set(absPath, { range, seq, turn: this.currentTurn, mtimeMs: st.mtimeMs, size: st.size });
+      const prev = this.views.get(absPath);
+      const same = !!prev && prev.range === range && prev.turn === this.currentTurn && prev.mtimeMs === st.mtimeMs && prev.size === st.size;
+      const count = same ? prev.count + 1 : 1;
+      this.views.set(absPath, { range, seq, turn: this.currentTurn, mtimeMs: st.mtimeMs, size: st.size, count });
+      return count;
     } catch {
-      // ignore
-    }
-  }
-
-  /** True when the same lines of an unchanged file were shown within the last few tool results of this turn. */
-  shownRecently(absPath: string, range: string, seq: number, window = 6): boolean {
-    const v = this.views.get(absPath);
-    if (!v || v.range !== range || v.turn !== this.currentTurn || seq - v.seq > window) return false;
-    try {
-      const st = statSync(absPath);
-      return st.mtimeMs === v.mtimeMs && st.size === v.size;
-    } catch {
-      return false;
+      return 1;
     }
   }
 

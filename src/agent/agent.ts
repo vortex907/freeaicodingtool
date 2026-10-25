@@ -192,10 +192,11 @@ export class Agent {
     // Prompt-cached models (Claude) read an unchanged history at a fraction of the price, while trimming
     // it rewrites the cache from that point on. They see the conversation as it is until compaction.
     if (this.opts.router.cachesPrompts(this.opts.pinnedModel() ?? this.currentModelKey)) return this.messages.slice();
-    // Token budget follows the task: hard tasks keep more tool output in view, quick ones less.
+    // Tool outputs stay in full while they fit a share of the context budget (more for hard tasks); past it
+    // the oldest are shortened first, so a task that reads many files keeps what it read instead of looping.
     const c = this.lastProfile?.complexity;
-    const budget = c === 'complex' ? { keepCurrent: 12, maxCurrent: 6000 } : c === 'trivial' || c === 'simple' ? { keepCurrent: 5, maxCurrent: 2500 } : {};
-    return leanView(this.messages, { turn: this.turn, ...budget });
+    const share = c === 'complex' ? 0.6 : c === 'trivial' || c === 'simple' ? 0.35 : 0.5;
+    return leanView(this.messages, { turn: this.turn, toolBudget: Math.floor(this.contextBudget() * share) });
   }
 
   /** Runs one user turn to completion. */

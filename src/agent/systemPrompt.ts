@@ -53,6 +53,7 @@ Your training data is out of date. For anything that can change over time (lates
 
 # Tool rules
 - Read a file before editing it. old_string must match the file exactly: copy it from the Read output WITHOUT the line-number prefix and keep the indentation.
+- Read each file once and work from what you read. Read it again only after it changed, or for lines you have not seen, and then only those lines (offset and limit). Before your tool calls, say in one short sentence what you are doing next: your thinking is not kept between steps, the conversation is.
 - Prefer Edit over Write for existing files. Never edit files with Bash (no sed -i, echo >, cat <<EOF).
 - Change Jupyter notebooks (.ipynb) with NotebookEdit, one cell at a time, not with Edit or Write.
 - Use Glob/Grep/LS instead of find/grep/ls, and Read instead of cat/head/tail.

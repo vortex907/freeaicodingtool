@@ -160,29 +160,44 @@ test('time-sensitive questions get the search reminder, coding requests do not',
   for (const q of ['update the README with install steps', 'make a calculator in csharp and make it good', 'fix the failing test', 'add a version field to package.json']) assert.equal(asksAboutCurrentInfo(q), false, q);
 });
 
-test('lean view trims old tool outputs but keeps recent ones and the call/result pairs', async () => {
+test('lean view keeps what fits, shortens the oldest outputs and keeps one copy of a re-read file', async () => {
   const { leanView } = await import('../src/agent/compaction.js');
   const big = 'x'.repeat(5000);
+  const source = Array.from({ length: 40 }, (_, i) => (i === 2 ? 'export function parseConfig(text) {' : i === 20 ? 'export class Loader {' : `  // line ${i + 1}`))
+    .map((l, i) => `${String(i + 1).padStart(6)}\t${l}`)
+    .join('\n');
+  const call = (id: string, name: string, args: object) => ({ role: 'assistant' as const, content: '', toolCalls: [{ id, name, arguments: JSON.stringify(args) }], meta: { turn: 2 } });
+  const result = (id: string, name: string, content: string) => ({ role: 'tool' as const, toolCallId: id, toolName: name, content, meta: { turn: 2 } });
   const msgs: ChatMessage[] = [
     { role: 'user', content: 'first task', meta: { turn: 1 } },
-    { role: 'assistant', content: '', reasoning: 'thinking...', toolCalls: [{ id: 'a', name: 'Read', arguments: '{"file_path":"src/app.ts"}' }], meta: { turn: 1 } },
-    { role: 'tool', toolCallId: 'a', toolName: 'Read', content: big, meta: { turn: 1 } },
-    { role: 'assistant', content: 'done', meta: { turn: 1 } },
+    { role: 'assistant', content: '', reasoning: 'thinking...', toolCalls: [{ id: 'a', name: 'Read', arguments: '{"file_path":"src/config.ts"}' }], meta: { turn: 1 } },
+    { role: 'tool', toolCallId: 'a', toolName: 'Read', content: source, meta: { turn: 1 } },
     { role: 'user', content: 'second task', meta: { turn: 2 } },
-    { role: 'assistant', content: '', toolCalls: [{ id: 'b', name: 'Bash', arguments: '{"command":"npm test"}' }], meta: { turn: 2 } },
-    { role: 'tool', toolCallId: 'b', toolName: 'Bash', content: big, meta: { turn: 2 } },
+    call('b', 'Bash', { command: 'npm test' }),
+    result('b', 'Bash', `FAIL test/config.test.js\n${big}`),
+    call('c', 'Read', { file_path: 'src/app.ts' }),
+    result('c', 'Read', big),
+    call('d', 'Read', { file_path: 'src/app.ts' }),
+    result('d', 'Read', big),
   ];
-  // keepLatest 0 so only the turn rules apply here.
-  const lean = leanView(msgs, { turn: 2, keepLatest: 0 });
+  // Room for about one big output: the newest stays, the re-read copy is dropped, the oldest are shortened.
+  const lean = leanView(msgs, { turn: 2, toolBudget: 1500, keepLatest: 1 });
   assert.equal(lean.length, msgs.length);
-  assert.match(lean[2]!.content, /output of Read\(src\/app\.ts\) \(1 lines\) from an earlier task/);
-  assert.equal(lean[2]!.toolCallId, 'a');
-  assert.equal(lean[6]!.content, big, 'current task output kept');
+  assert.equal(lean[9]!.content, big, 'the newest output is kept');
+  assert.match(lean[7]!.content, /src\/app\.ts was read again later in this conversation/);
+  assert.match(lean[5]!.content, /The output of Bash\(npm test\) \(2 lines\) is not repeated here to save space\. It started with: FAIL test\/config\.test\.js/);
+  assert.match(lean[2]!.content, /The Read of src\/config\.ts \(40 lines\) is not repeated here.*function parseConfig \(line 3\).*class Loader \(line 21\).*Read only those lines \(offset and limit\)/);
+  assert.equal(lean[2]!.toolCallId, 'a', 'calls and results stay paired');
   assert.equal(lean[1]!.reasoning, undefined, 'reasoning is not resent');
-  assert.equal(msgs[2]!.content, big, 'the stored history is untouched');
+  assert.equal(msgs[2]!.content, source, 'the stored history is untouched');
+  // With enough room nothing is shortened (only the duplicate read).
+  const roomy = leanView(msgs, { turn: 2, toolBudget: 100000 });
+  assert.equal(roomy[2]!.content, source);
+  assert.match(roomy[5]!.content, /^FAIL/);
+  assert.match(roomy[7]!.content, /read again later/);
 });
 
-test('re-reading an unchanged file within a task returns a short note', async () => {
+test('re-reading an unchanged file returns it again, with a note after the third time', async () => {
   const { mkdtempSync, writeFileSync, utimesSync } = await import('node:fs');
   const os = await import('node:os');
   const path = await import('node:path');
@@ -202,7 +217,13 @@ test('re-reading an unchanged file within a task returns a short note', async ()
     return r.content;
   };
   assert.match(await read(), /one/);
-  assert.match(await read(), /has not changed since you read these lines/);
+  // The content always comes back (an earlier copy may be out of view); the third time with a firm note.
+  const second = await read();
+  assert.match(second, /one/);
+  assert.doesNotMatch(second, /system-note/);
+  const third = await read();
+  assert.match(third, /one/);
+  assert.match(third, /read these lines 3 times in this task and the file has not changed/);
   writeFileSync(file, 'one\ntwo\nthree\n');
   utimesSync(file, new Date(), new Date(Date.now() + 5000));
   assert.match(await read(), /three/, 'a changed file is read again');

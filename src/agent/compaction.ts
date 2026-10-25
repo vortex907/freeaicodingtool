@@ -3,6 +3,7 @@
 import type { ChatMessage } from '../providers/types.js';
 import { estimateMessagesTokens, estimateTextTokens } from '../util/tokens.js';
 import { truncate } from '../util/strings.js';
+import { CONTAINER_KINDS, extract, langOf } from '../codeindex/lang.js';
 
 export const SUMMARY_INSTRUCTIONS = `Write a detailed summary of the conversation so far so the work can continue seamlessly in a fresh context. Include:
 1. The user's requests and goals (quote important instructions and preferences verbatim).
@@ -16,6 +17,7 @@ Be specific: keep exact names, paths, numbers and error messages. Do not invent 
 /** Replaces old, large tool outputs with short placeholders. Returns the number of tokens saved. */
 export function pruneToolOutputs(messages: ChatMessage[], keepRecent = 6, minChars = 600): number {
   let saved = 0;
+  const calls = callsById(messages);
   const toolIdx: number[] = [];
   messages.forEach((m, i) => {
     if (m.role === 'tool' && !m.meta?.pruned) toolIdx.push(i);
@@ -25,8 +27,7 @@ export function pruneToolOutputs(messages: ChatMessage[], keepRecent = 6, minCha
     const m = messages[i]!;
     if (m.content.length < minChars) continue;
     const before = estimateTextTokens(m.content);
-    const firstLine = truncate(m.content.split('\n').find((l) => l.trim()) ?? '', 120);
-    const placeholder = `[Output of ${m.toolName ?? 'tool'} pruned to save context (${m.content.length} chars). First line: ${firstLine}. Run the tool again if you need it.]`;
+    const placeholder = shortNote(m, calls.get(m.toolCallId ?? ''));
     messages[i] = { ...m, content: placeholder, meta: { ...m.meta, pruned: true } };
     saved += before - estimateTextTokens(placeholder);
   }
@@ -52,35 +53,49 @@ export function describeCall(name: string, args: string): string {
 }
 
 export interface LeanOptions {
-  /** The current turn number; tool outputs from earlier turns are trimmed harder. */
+  /** The current turn number; attachments from earlier turns are trimmed. */
   turn: number;
-  /** Tool results of the current turn kept in full regardless of size. */
-  keepCurrent?: number;
-  /** Tool results kept in full regardless of turn (the most recent ones). */
+  /** Tokens all tool outputs together may take; past it the oldest are shortened first. */
+  toolBudget?: number;
+  /** The newest tool outputs stay in full whatever their size. */
   keepLatest?: number;
-  /** Size above which an older output becomes a placeholder. */
-  maxEarlier?: number;
-  maxCurrent?: number;
 }
 
 /**
- * The conversation as sent to the model. Large tool outputs from earlier tasks (and the older ones of
- * the current task) become one-line placeholders, attachments from earlier tasks are dropped, and
- * reasoning is never resent. Tool calls stay paired with their results; the full history is kept in
- * the session for the user. Free tiers resend everything on every step, so this saves most tokens.
+ * The conversation as sent to the model. Tool outputs stay in full while they fit the budget; past it the
+ * oldest become a short note (for a file: what it defines, so the model can read just the lines it needs
+ * instead of the whole file again). A file read again later is kept once, as the newer copy. Older
+ * screenshots and attachments from earlier tasks are dropped and reasoning is never resent. Tool calls stay
+ * paired with their results; the full history is kept in the session for the user.
  */
 export function leanView(messages: ChatMessage[], opts: LeanOptions): ChatMessage[] {
-  const keepCurrent = opts.keepCurrent ?? 8;
-  const keepLatest = opts.keepLatest ?? 2;
-  const maxEarlier = opts.maxEarlier ?? 1200;
-  const maxCurrent = opts.maxCurrent ?? 4000;
-  const toolIdx: number[] = [];
-  messages.forEach((m, i) => m.role === 'tool' && toolIdx.push(i));
-  const current = toolIdx.filter((i) => (messages[i]!.meta?.turn ?? opts.turn) >= opts.turn);
-  const lastN = (list: number[], n: number) => (n > 0 ? list.slice(-n) : []); // slice(-0) would keep everything
-  const keep = new Set([...lastN(current, keepCurrent), ...lastN(toolIdx, keepLatest)]);
-  const labels = new Map<string, string>();
-  for (const m of messages) for (const tc of m.toolCalls ?? []) labels.set(tc.id, describeCall(tc.name, tc.arguments));
+  const keepLatest = opts.keepLatest ?? 4;
+  const budget = opts.toolBudget ?? 24000;
+  const calls = callsById(messages);
+  // A Read of the same file and range as a later Read: the later one is newer, so keep only that.
+  const superseded = new Set<number>();
+  const later = new Set<string>();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== 'tool' || m.isError || m.meta?.pruned) continue;
+    const c = calls.get(m.toolCallId ?? '');
+    const file = c?.name === 'Read' ? pathArg(c.args) : undefined;
+    if (!file) continue;
+    const key = `${file}\n${String(c!.args.offset ?? '')}\n${String(c!.args.limit ?? '')}`;
+    if (later.has(key)) superseded.add(i);
+    else later.add(key);
+  }
+  // Newest first: keep what fits, shorten the rest (small outputs cost little and stay).
+  const shorten = new Set<number>();
+  let used = 0;
+  let seen = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== 'tool' || m.meta?.pruned || superseded.has(i)) continue;
+    const tokens = estimateTextTokens(m.content);
+    if (seen++ < keepLatest || tokens <= 200 || used + tokens <= budget) used += tokens;
+    else shorten.add(i);
+  }
   // Only the newest screenshot is worth its tokens; older ones are described by their tool results.
   let lastShot = -1;
   messages.forEach((m, i) => m.meta?.kind === 'screenshot' && m.images?.length && (lastShot = i));
@@ -88,16 +103,74 @@ export function leanView(messages: ChatMessage[], opts: LeanOptions): ChatMessag
     const earlier = (m.meta?.turn ?? opts.turn) < opts.turn;
     if (m.meta?.kind === 'screenshot' && i !== lastShot) return { ...m, images: undefined, content: '[An older screenshot was here.]' };
     if (m.role === 'assistant' && m.reasoning) return { ...m, reasoning: undefined };
-    if (m.role === 'tool' && !m.meta?.pruned && !keep.has(i) && m.content.length > (earlier ? maxEarlier : maxCurrent)) {
-      const what = labels.get(m.toolCallId ?? '') ?? m.toolName ?? 'a tool';
-      const lines = m.content.split('\n').length;
-      return { ...m, content: `[The output of ${what} (${lines} lines) from ${earlier ? 'an earlier task' : 'earlier in this task'} is not repeated here to save space. Run it again if you need it.]` };
+    if (m.role === 'tool' && superseded.has(i)) {
+      return { ...m, content: `[${pathArg(calls.get(m.toolCallId ?? '')!.args)} was read again later in this conversation; the newer copy is further down.]` };
     }
+    if (m.role === 'tool' && shorten.has(i)) return { ...m, content: shortNote(m, calls.get(m.toolCallId ?? '')) };
     if (m.role === 'user' && earlier && m.content.length > 4000 && /<attached-(file|folder)/.test(m.content)) {
       return { ...m, content: m.content.replace(/(<attached-(file|folder)\b[^>]*>)[\s\S]*?(<\/attached-\2>)/g, '$1\n[contents omitted; read the file again if you need it]\n$3') };
     }
     return m;
   });
+}
+
+type CallInfo = { name: string; args: Record<string, unknown> };
+
+function callsById(messages: ChatMessage[]): Map<string, CallInfo> {
+  const calls = new Map<string, CallInfo>();
+  for (const m of messages) {
+    for (const tc of m.toolCalls ?? []) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(tc.arguments) as Record<string, unknown>;
+      } catch {
+        // keep empty
+      }
+      calls.set(tc.id, { name: tc.name, args: args && typeof args === 'object' ? args : {} });
+    }
+  }
+  return calls;
+}
+
+function pathArg(args: Record<string, unknown>): string | undefined {
+  for (const k of ['file_path', 'path', 'filePath', 'filename', 'file', 'target_file', 'notebook_path']) {
+    if (typeof args[k] === 'string' && args[k]) return args[k] as string;
+  }
+  return undefined;
+}
+
+/** What a file defines, from Read output ("   12\tcode" lines), e.g. "function parse (line 12), class Lexer (line 40)". */
+export function outlineOf(file: string, readOutput: string): string {
+  const numbered = readOutput.split('\n').map((l) => /^\s*(\d+)\t(.*)$/.exec(l)).filter((x): x is RegExpExecArray => !!x);
+  if (numbered.length < 20) return '';
+  const first = Number(numbered[0]![1]);
+  const family = langOf(file.replace(/\\/g, '/')).family;
+  if (!family || family === 'md') return '';
+  let syms: { name: string; kind: string; line: number; indent: number }[];
+  try {
+    syms = extract(family, numbered.map((x) => x[2]!)).syms.filter((sym) => !sym.boundaryOnly);
+  } catch {
+    return '';
+  }
+  if (!syms.length) return '';
+  const minIndent = Math.min(...syms.map((sym) => sym.indent));
+  const top = syms.filter((sym) => sym.indent === minIndent || CONTAINER_KINDS.has(sym.kind));
+  const pick = (top.length >= 3 ? top : syms).slice(0, 25);
+  const more = (top.length >= 3 ? top : syms).length - pick.length;
+  return `${pick.map((sym) => `${sym.kind} ${sym.name} (line ${sym.line + first - 1})`).join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+}
+
+/** A tool output that no longer fits, as one line that says what it was. */
+function shortNote(m: ChatMessage, c: CallInfo | undefined): string {
+  const lines = m.content.split('\n').length;
+  const file = c?.name === 'Read' ? pathArg(c.args) : undefined;
+  if (file) {
+    const outline = outlineOf(file, m.content);
+    return `[The Read of ${file} (${lines} lines) is not repeated here to save space.${outline ? ` It defines: ${outline}.` : ''} If you need exact lines from it again, Read only those lines (offset and limit) instead of the whole file.]`;
+  }
+  const what = c ? describeCall(c.name, JSON.stringify(c.args)) : (m.toolName ?? 'a tool');
+  const first = m.content.split('\n').find((l) => l.trim()) ?? '';
+  return `[The output of ${what} (${lines} lines) is not repeated here to save space. It started with: ${truncate(first.trim(), 160)}]`;
 }
 
 /** Index where the "recent" part starts so that it begins with a user message (never splits tool pairs). */

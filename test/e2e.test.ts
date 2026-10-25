@@ -437,3 +437,26 @@ test('a picked paid model works when no free provider is configured', async () =
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /Only Claude here/);
 });
+
+test('a task that reads many files keeps them in view and a re-read returns the content', async () => {
+  const env = setup({ rr: { model: 'reader', quality: 80 } });
+  const files = Array.from({ length: 10 }, (_, i) => `mod${i}.js`);
+  for (const [i, f] of files.entries()) writeFileSync(path.join(env.project, f), `// module ${i}\n${`export const value${i} = ${i};\n`.repeat(160)}`);
+  server.script('rr', [
+    tools(...files.map((f) => ({ name: 'Read', args: { file_path: f } }))),
+    tools({ name: 'Read', args: { file_path: 'mod0.js' } }),
+    text('All ten modules export numbered values.'),
+  ]);
+  const r = await runCli(env, ['-p', 'what do these modules export?', '--yolo']);
+  assert.equal(r.code, 0, r.stderr);
+  const [, second, third] = server.requestsFor('rr').slice(-3).map((q) => q.body.messages as { role: string; content: string }[]);
+  // After ten reads every file is still there in full: nothing pushes the first ones out.
+  const results = second!.filter((m) => m.role === 'tool');
+  assert.equal(results.length, 10);
+  for (const [i, m] of results.entries()) assert.match(m.content, new RegExp(`// module ${i}[\\s\\S]*value${i} = ${i};`));
+  // Reading mod0.js again returns the content, and the older copy turns into a pointer to it.
+  const last = third!.filter((m) => m.role === 'tool');
+  assert.match(last.at(-1)!.content, /\/\/ module 0/);
+  assert.doesNotMatch(last.at(-1)!.content, /has not changed since you read/);
+  assert.match(last[0]!.content, /mod0\.js was read again later/);
+});
