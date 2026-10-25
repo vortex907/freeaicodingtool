@@ -49,6 +49,9 @@ const IDLE_MS = 15 * 60_000;
 const REQUEST_MS = 15_000;
 // dlv compiles the program while it handles launch.
 const LAUNCH_MS = 180_000;
+// An attached program runs on: report it soon, so breakpoints can be set while it runs.
+const ATTACH_WAIT_MS = 1000;
+const ATTACHED_RUNNING = 'The program is running. Set breakpoints with break, then use continue to wait for one to hit, or pause to break in.';
 const STOP_FRAMES = 5;
 const STACK_FRAMES = 30;
 const CONTEXT_LINES = 2;
@@ -74,6 +77,8 @@ const typeText = (t: string | undefined) => (t && t !== '<no-type>' ? ` (${trunc
 export class DapSession {
   /** The program ended or the session was closed. */
   ended = false;
+  /** Attached to a process that was already running: it is left running when the session ends. */
+  attached = false;
   private running = false;
   private stopSeq = 0;
   private lastStop: StoppedEventBody | null = null;
@@ -116,22 +121,30 @@ export class DapSession {
     if (spec.transport === 'tcp') client.onStdio = (text) => this.addOutput(text);
   }
 
-  /** Starts the adapter, launches the program and waits for the first stop. */
+  /** Starts the adapter, launches the program (or attaches to it) and waits for the first stop. */
   static async start(o: { spec: AdapterSpec; target: LaunchTarget; breakpoints: BreakpointSpec[]; env: NodeJS.ProcessEnv; baseDir: string; wait: Waiting }): Promise<{ session: DapSession | null; report: Report }> {
     const { spec, target, wait } = o;
+    const attach = target.attach;
     let client: DapClient;
     try {
-      client = await DapClient.start({ command: spec.command, args: spec.args, cwd: target.cwd, env: { ...o.env, ...spec.env }, transport: spec.transport }, wait.signal);
+      // On a port the program already runs its own adapter (debugpy --listen, dlv --headless).
+      client =
+        attach?.port !== undefined
+          ? await DapClient.connect(attach.host || '127.0.0.1', attach.port, wait.signal)
+          : await DapClient.start({ command: spec.command, args: spec.args, cwd: target.cwd, env: { ...o.env, ...spec.env }, transport: spec.transport }, wait.signal);
     } catch (e) {
-      return { session: null, report: { text: `Could not start ${spec.name}: ${(e as Error).message}`, isError: true } };
+      return { session: null, report: { text: attach?.port !== undefined ? (e as Error).message : `Could not start ${spec.name}: ${(e as Error).message}`, isError: true } };
     }
     const s = new DapSession(spec, client, o.baseDir);
+    s.attached = !!attach;
     for (const bp of o.breakpoints) s.remember(bp);
-    const header = `Started ${s.shownPath({ path: target.program })} with ${spec.name}.`;
+    const header = attach
+      ? `Attached ${spec.name} to ${attach.port !== undefined ? `${attach.host || '127.0.0.1'}:${attach.port}` : `process ${attach.pid}`}.`
+      : `Started ${s.shownPath({ path: target.program })} with ${spec.name}.`;
     try {
       const mark = await s.launch(target, wait.signal);
-      const report = await s.settle(mark, wait);
-      const missed = s.ended && o.breakpoints.length ? 'No breakpoint was hit.' : '';
+      const report = attach ? await s.settle(mark, { ...wait, timeoutMs: Math.min(wait.timeoutMs, ATTACH_WAIT_MS) }, ATTACHED_RUNNING) : await s.settle(mark, wait);
+      const missed = s.ended && !attach && o.breakpoints.length ? 'No breakpoint was hit.' : '';
       s.armIdle();
       return { session: s.ended ? null : s, report: { ...report, text: [header, ...s.notes, report.text, missed].filter(Boolean).join('\n') } };
     } catch (e) {
@@ -203,7 +216,7 @@ export class DapSession {
   private async programEnded(): Promise<void> {
     if (this.ending) return;
     this.ending = true;
-    await this.client.request('disconnect', { terminateDebuggee: true }, 3000).catch(() => undefined);
+    await this.client.request('disconnect', { terminateDebuggee: !this.attached }, 3000).catch(() => undefined);
     this.finish();
   }
 
@@ -226,13 +239,13 @@ export class DapSession {
     this.notify();
   }
 
-  /** Ends the session: the program is terminated and the adapter stopped. */
+  /** Ends the session: the program is terminated (or detached from, when attached) and the adapter stopped. */
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
     if (!this.closed && !this.ending) {
       this.ending = true;
-      await this.client.request('disconnect', { terminateDebuggee: true, restart: false }, 2000).catch(() => undefined);
+      await this.client.request('disconnect', { terminateDebuggee: !this.attached, restart: false }, 2000).catch(() => undefined);
     }
     this.finish();
   }
@@ -264,7 +277,7 @@ export class DapSession {
   // ------------------------------------------------------------------ launch
 
   private failure(e: Error): string {
-    const parts = [`${this.spec.name} could not run the program: ${e.message}`];
+    const parts = [`${this.spec.name} could not ${this.attached ? 'attach' : 'run the program'}: ${e.message}`];
     const out = cleanOutput(this.launchOutput + this.output).trim();
     if (out) parts.push(truncateMiddle(out, 4000, 0.3));
     const diag = this.client.diagnostics;
@@ -281,8 +294,10 @@ export class DapSession {
     });
   }
 
-  /** initialize, launch, the configuration requests and configurationDone. Returns the stop count to wait after. */
+  /** initialize, launch or attach, the configuration requests and configurationDone. Returns the stop count to wait after. */
   private async launch(t: LaunchTarget, signal: AbortSignal): Promise<number> {
+    const attachArgs = t.attach && this.spec.attachArgs?.(t.attach);
+    if (t.attach && !attachArgs) throw new DapError(`${this.spec.name} cannot attach to a process.`);
     const initialized = this.client.waitForEvent('initialized', LAUNCH_MS);
     initialized.catch(() => undefined);
     const caps = await this.abortable(
@@ -306,10 +321,12 @@ export class DapSession {
       signal,
     );
     Object.assign(this.client.capabilities, caps);
-    const useEntry = t.stopOnEntry && !!this.spec.entryFunction && caps.supportsFunctionBreakpoints !== false;
-    const launched = this.client.request('launch', this.spec.launchArgs({ ...t, stopOnEntry: t.stopOnEntry && !useEntry }), LAUNCH_MS);
+    const useEntry = !attachArgs && t.stopOnEntry && !!this.spec.entryFunction && caps.supportsFunctionBreakpoints !== false;
+    const launched = attachArgs
+      ? this.client.request('attach', attachArgs, LAUNCH_MS)
+      : this.client.request('launch', this.spec.launchArgs({ ...t, stopOnEntry: t.stopOnEntry && !useEntry }), LAUNCH_MS);
     launched.catch(() => undefined);
-    // Most adapters send initialized after launch; debugpy answers launch only after configurationDone.
+    // Most adapters send initialized after launch; debugpy answers launch (and attach) only after configurationDone.
     await this.abortable(Promise.race([initialized, launched.then(() => initialized)]), signal);
     if (!caps.supportsConditionalBreakpoints && [...this.lineBreakpoints.values()].flat().some((b) => b.condition)) this.notes.push(`${this.spec.name} ignores breakpoint conditions.`);
     for (const [file, list] of this.lineBreakpoints) {
@@ -394,7 +411,7 @@ export class DapSession {
   }
 
   /** Waits for the program to stop or end after `mark` and reports what happened. */
-  private async settle(mark: number, w: Waiting): Promise<Report> {
+  private async settle(mark: number, w: Waiting, runningText?: string): Promise<Report> {
     let state = await this.waitForStop(mark, w);
     while (state === 'stopped') {
       const again = await this.passEntry();
@@ -409,7 +426,7 @@ export class DapSession {
       parts.push(this.endText());
       isError = !!this.crash || (this.exitCode !== null && this.exitCode !== 0);
     } else if (state === 'running') {
-      parts.push(`[The program is still running after ${formatDuration(w.timeoutMs)}. Use action "pause" to break in, or "send" with no command to keep waiting (with a larger timeout if needed).]`);
+      parts.push(runningText ?? `[The program is still running after ${formatDuration(w.timeoutMs)}. Use action "pause" to break in, or "send" with no command to keep waiting (with a larger timeout if needed).]`);
     } else parts.push('[Stopped waiting because the user interrupted. The debug session is still open.]');
     return { text: parts.filter(Boolean).join('\n'), isError };
   }
@@ -598,7 +615,7 @@ export class DapSession {
     const where = spec.name ?? `${this.shownPath({ path: spec.file })}:${spec.line}`;
     const cond = spec.condition ? ` when ${spec.condition}` : '';
     if (!bp) return `Breakpoint at ${where}${cond} was sent, but ${this.spec.name} did not confirm it.`;
-    if (!bp.verified) return `Breakpoint at ${where}${cond} is not active yet${bp.message ? ` (${bp.message.trim()})` : ''}. It may bind once that code is loaded.`;
+    if (!bp.verified) return `Breakpoint at ${where}${cond} is not active yet${bp.message?.trim() ? ` (${bp.message.trim().replace(/\.$/, '')})` : ''}. It may bind once that code is loaded.`;
     if (spec.name) return `Breakpoint set on ${where}${cond}${bp.source?.path && bp.line ? ` (${this.shownPath(bp.source)}:${bp.line})` : ''}.`;
     const moved = spec.line && bp.line && bp.line !== spec.line ? ` (moved to line ${bp.line}, the nearest line with code)` : '';
     return `Breakpoint set at ${where}${cond}${moved}.`;

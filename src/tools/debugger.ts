@@ -7,7 +7,7 @@ import type { PermissionRequest, PreparedCall, SessionState, Tool, ToolContext, 
 import { errorResult, fail, numParam, ok, strParam } from './types.js';
 import { cleanOutput, killTree, MAX_OUTPUT_FOR_MODEL } from './bash.js';
 import { findPython, keepTail, PYTHON_MISSING, trackChild } from './repl.js';
-import { chooseBackend, parseAdapter, type AdapterSpec } from '../dap/adapters.js';
+import { attachBackend, chooseBackend, parseAdapter, type AdapterSpec, type AttachTarget, type LaunchTarget } from '../dap/adapters.js';
 import { DapSession, type BreakpointSpec, type Report, type ResumeKind, type Waiting } from '../dap/session.js';
 import { isWindows } from '../util/platform.js';
 import { formatDuration, truncate, truncateMiddle } from '../util/strings.js';
@@ -321,12 +321,27 @@ const ACTION_LIST = 'start, break, clear, continue, next, step_in, step_out, pau
 function actionOf(input: Record<string, unknown>): Action | null {
   const a = strParam(input, 'action', 'op')?.trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (a) return ACTIONS[a] ?? null;
-  if (programParam(input)) return 'start';
+  if (programParam(input) || pidParam(input) !== undefined) return 'start';
   if (strParam(input, 'expression', 'expr') !== undefined) return 'eval';
   return strParam(input, 'command', 'cmd') !== undefined ? 'send' : null;
 }
 
 const programParam = (input: Record<string, unknown>) => strParam(input, 'program', 'file', 'file_path', 'path', 'script');
+const pidParam = (input: Record<string, unknown>) => numParam(input, 'pid', 'process_id', 'processId');
+
+/** A running process to attach to: `pid`, or `port` (a number or host:port) for debugpy. Null when neither is given. */
+function attachParam(input: Record<string, unknown>): AttachTarget | { error: string } | null {
+  const pid = pidParam(input);
+  const port = strParam(input, 'port')?.trim();
+  if (port) {
+    const m = /^(?:\[?([^\]]*?)\]?:)?(\d+)$/.exec(port);
+    if (!m) return { error: 'port must be a port number or host:port.' };
+    return { port: Number(m[2]), host: m[1] || strParam(input, 'host') };
+  }
+  if (pid === undefined) return null;
+  return Number.isInteger(pid) && pid > 0 ? { pid } : { error: 'pid must be the id of a running process.' };
+}
+
 const commandParam = (input: Record<string, unknown>) => strParam(input, 'command', 'cmd', 'input') ?? '';
 const expressionParam = (input: Record<string, unknown>) => strParam(input, 'expression', 'expr', 'command', 'code') ?? '';
 const conditionParam = (input: Record<string, unknown>) => strParam(input, 'condition', 'cond', 'if', 'when')?.trim() || undefined;
@@ -398,18 +413,21 @@ function permission(kind: string, title: string, subject: string): PermissionReq
 // ------------------------------------------------------------------ actions
 
 async function prepareStart(input: Record<string, unknown>, ctx: ToolContext, timeout: number): Promise<PreparedCall> {
+  const attach = attachParam(input);
+  if (attach && 'error' in attach) return errorResult(attach.error);
   const raw = programParam(input);
-  if (!raw) return errorResult('Missing required parameter: program');
+  if (!raw && !attach) return errorResult('Missing required parameter: program');
   const adapter = parseAdapter(strParam(input, 'adapter', 'debugger', 'engine'));
   if (!adapter) return errorResult('adapter must be auto, debugpy, pdb, node, lldb-dap, netcoredbg or dlv.');
   const cwdRaw = strParam(input, 'cwd', 'working_directory', 'workdir');
   const cwd = cwdRaw ? path.resolve(ctx.session.cwd, cwdRaw) : existsSync(ctx.session.cwd) ? ctx.session.cwd : ctx.projectRoot;
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) return errorResult(`Working directory not found: ${cwd}`);
-  // A relative program is looked up in the current folder, then in cwd.
-  let abs = path.resolve(ctx.session.cwd, raw);
-  if (!existsSync(abs) && cwdRaw && existsSync(path.resolve(cwd, raw))) abs = path.resolve(cwd, raw);
   const breakpoints = breakpointsParam(input, ctx.session.cwd);
   if ('error' in breakpoints) return errorResult(breakpoints.error);
+  if (attach) return prepareAttach(attach, raw ? path.resolve(ctx.session.cwd, raw) : undefined, adapter, cwd, breakpoints, ctx, timeout);
+  // A relative program is looked up in the current folder, then in cwd.
+  let abs = path.resolve(ctx.session.cwd, raw!);
+  if (!existsSync(abs) && cwdRaw && existsSync(path.resolve(cwd, raw!))) abs = path.resolve(cwd, raw!);
   const backend = await chooseBackend(abs, adapter);
   if ('error' in backend) return errorResult(backend.error);
   const args = argsParam(input);
@@ -427,20 +445,37 @@ async function prepareStart(input: Record<string, unknown>, ctx: ToolContext, ti
   const program = backend.program;
   return {
     permission: permission(spec.kind, `Debug ${KIND_NAME[spec.kind]} program`, `${spec.name} ${[path.relative(ctx.session.cwd, program) || program, ...args].join(' ')}`),
-    execute: async () => {
-      await disposeSession(ctx.session);
-      const { session, report } = await DapSession.start({
-        spec,
-        target: { program, args, cwd, stopOnEntry: breakpoints.length === 0 },
-        breakpoints,
-        env: { ...process.env, ...ctx.settings.env, FREECODE: '1' },
-        baseDir: ctx.session.cwd,
-        wait: waiting(ctx, timeout),
-      });
-      if (session) sessions.set(ctx.session, session);
-      return dapResult(report);
-    },
+    execute: () => startDap(spec, { program, args, cwd, stopOnEntry: breakpoints.length === 0 }, breakpoints, ctx, timeout),
   };
+}
+
+async function prepareAttach(attach: AttachTarget, program: string | undefined, adapter: string, cwd: string, breakpoints: BreakpointSpec[], ctx: ToolContext, timeout: number): Promise<PreparedCall> {
+  if (program && !existsSync(program)) return errorResult(`File not found: ${program}`);
+  const backend = await attachBackend(adapter === 'auto' && attach.port !== undefined ? 'debugpy' : adapter, program);
+  if ('error' in backend) return errorResult(backend.error);
+  const { spec } = backend;
+  if (attach.port !== undefined && spec.kind !== 'python') {
+    return errorResult(`port works with debugpy (a Python program started with python -m debugpy --listen <port>). Attach ${spec.name} with pid.`);
+  }
+  const where = attach.port !== undefined ? `${attach.host || '127.0.0.1'}:${attach.port}` : `process ${attach.pid}`;
+  return {
+    permission: permission(spec.kind, 'Attach debugger', `${spec.name} attach to ${where}`),
+    execute: () => startDap(spec, { program: program ?? '', args: [], cwd, stopOnEntry: false, attach: { ...attach, program } }, breakpoints, ctx, timeout),
+  };
+}
+
+async function startDap(spec: AdapterSpec, target: LaunchTarget, breakpoints: BreakpointSpec[], ctx: ToolContext, timeout: number): Promise<ToolResult> {
+  await disposeSession(ctx.session);
+  const { session, report } = await DapSession.start({
+    spec,
+    target,
+    breakpoints,
+    env: { ...process.env, ...ctx.settings.env, FREECODE: '1' },
+    baseDir: ctx.session.cwd,
+    wait: waiting(ctx, timeout),
+  });
+  if (session) sessions.set(ctx.session, session);
+  return dapResult(report);
 }
 
 const waiting = (ctx: ToolContext, timeoutMs: number): Waiting => ({ timeoutMs, signal: ctx.signal, progress: ctx.services.progress });
@@ -466,6 +501,8 @@ function prepareDap(s: DapSession, action: Action, input: Record<string, unknown
         const r = await fn();
         return dapResult(typeof r === 'string' ? { text: r } : r);
       } catch (e) {
+        // The adapter or the program went away during the call: say how it ended.
+        if (s.ended) return dapResult({ ...s.finalReport(), isError: true });
         return fail((e as Error).message);
       } finally {
         if (s.ended && sessions.get(ctx.session) === s) sessions.delete(ctx.session);
@@ -579,8 +616,9 @@ async function stopAction(ctx: ToolContext): Promise<ToolResult> {
   let output: string;
   if (s instanceof DapSession) output = s.ended ? s.finalReport().text : s.takeOutput();
   else output = forModel(s.take(), s.lang);
+  const detached = s instanceof DapSession && s.attached && !s.ended;
   await disposeSession(ctx.session);
-  return ok(`${output ? `${output}\n` : ''}Debug session stopped.`);
+  return ok(`${output ? `${output}\n` : ''}${detached ? 'Debugger detached. The program keeps running.' : 'Debug session stopped.'}`);
 }
 
 export const DebuggerTool: Tool = {
@@ -590,6 +628,7 @@ export const DebuggerTool: Tool = {
     'Debug a program: pause it at breakpoints, step through it and read variables to see where it goes wrong. ' +
     'Python runs under debugpy (pdb when debugpy is missing), JavaScript under node inspect, C, C++, Rust and Swift executables under lldb-dap, C# under netcoredbg (start the built .dll) and Go under Delve (start a .go file or package folder). ' +
     'action=start runs `program` (with `args`, `cwd`) and pauses at its start, or runs to the first of `breakpoints` (file:line) when given. ' +
+    'start with `pid` (or `port` for debugpy) attaches to a process that is already running; stop then detaches and leaves it running. ' +
     'Then: break (`location` file:line or a function name, optional `condition`), clear, continue, next (step over), step_in, step_out, pause, stack, vars (variables of `frame`, nested values `depth` levels deep), eval (`expression`), threads and stop. ' +
     'Each stop shows the location, the source around it and the top frames. send types a raw debugger `command` (pdb or node inspect syntax, or the debug console of the adapter); send with no command waits for a running program to stop. ' +
     'One session at a time: start again to restart. Build native programs with debug info first (cc -g, cargo build, dotnet build); compile TypeScript and debug the .js output.\n' +
@@ -601,6 +640,8 @@ export const DebuggerTool: Tool = {
       program: { type: 'string', description: 'For start: a .py, .js, .go or .dll file, a Go package folder or a native executable' },
       args: { type: 'array', items: { type: 'string' }, description: 'Program arguments, for start' },
       cwd: { type: 'string', description: 'Working directory of the program, for start (default: the current folder)' },
+      pid: { type: 'number', description: 'For start: attach to this running process instead of starting a program (give adapter, or program for the language)' },
+      port: { type: 'string', description: 'For start: attach debugpy to a Python program started with python -m debugpy --listen <port> (a port or host:port)' },
       adapter: { type: 'string', enum: ['auto', 'debugpy', 'pdb', 'node', 'lldb-dap', 'netcoredbg', 'dlv'], description: 'Debugger to use, for start (default: picked from the program)' },
       breakpoints: { type: 'array', items: { type: 'string' }, description: 'file:line breakpoints to set before the program runs, for start' },
       location: { type: 'string', description: 'file:line or a function name, for break and clear (clear without it removes all)' },
@@ -617,6 +658,8 @@ export const DebuggerTool: Tool = {
   },
   label: (input) => {
     const action = actionOf(input);
+    const attachTo = pidParam(input) ?? strParam(input, 'port');
+    if (action === 'start' && attachTo !== undefined) return `Debugger(attach ${truncate(String(attachTo), 60)})`;
     if (action === 'start') return `Debugger(start ${truncate(programParam(input) ?? '?', 60)})`;
     if (action === 'stop') return 'Debugger(stop)';
     if (action === 'eval') return `Debugger(eval ${truncate(expressionParam(input).trim().replace(/\s+/g, ' '), 60)})`;

@@ -101,7 +101,8 @@ test('REPL and Debugger calls match their permission rules', async () => {
 
 test('pdb: stop at a breakpoint and print a variable', { skip: noPython }, async () => {
   writeFileSync(path.join(dir, 'calc.py'), 'def add(a, b):\n    total = a + b\n    return total\n\n\nresult = add(2, 3)\nprint("result", result)\n');
-  const start = await call(DebuggerTool, { action: 'start', file: 'calc.py' });
+  // pdb itself: with debugpy installed, Python programs go to debugpy by default.
+  const start = await call(DebuggerTool, { action: 'start', file: 'calc.py', adapter: 'pdb' });
   assert.match(start.content, /calc\.py\(1\)<module>\(\)/);
   assert.match((await call(DebuggerTool, { action: 'send', command: 'b calc.py:3' })).content, /Breakpoint 1 at .*calc\.py:3/);
   assert.match((await call(DebuggerTool, { action: 'send', command: 'c' })).content, /calc\.py\(3\)add\(\)/);

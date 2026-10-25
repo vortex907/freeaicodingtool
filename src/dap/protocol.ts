@@ -146,7 +146,11 @@ export class MessageReader {
         this.skip(end + 4);
         continue;
       }
-      if (m.index > 0) this.junk = (this.junk + header.slice(0, m.index)).slice(-MAX_JUNK);
+      if (m.index > 0) {
+        // Text in front of the header; drop it now, the body may not be here yet. (latin1: one byte per character)
+        this.skip(m.index);
+        continue;
+      }
       const start = end + 4;
       const length = Number(m[1]);
       if (this.buf.length < start + length) return out;

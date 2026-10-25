@@ -4,18 +4,29 @@ import { execFile, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { findPython, type PythonCommand } from '../tools/repl.js';
+import { findPython, PYTHON_MISSING, type PythonCommand } from '../tools/repl.js';
 import { isMac, isWindows, which } from '../util/platform.js';
 import { randomId } from '../util/strings.js';
 
 /** Language family of a DAP session; also what Debugger(...) permission rules match. */
 export type DebugKind = 'python' | 'native' | 'csharp' | 'go';
 
+/** A running process to attach to: by id, or (debugpy) the address a `python -m debugpy --listen` program listens on. */
+export interface AttachTarget {
+  pid?: number;
+  host?: string;
+  port?: number;
+  /** The program the process runs, when known (lldb-dap loads its symbols). */
+  program?: string;
+}
+
 export interface LaunchTarget {
   program: string;
   args: string[];
   cwd: string;
   stopOnEntry: boolean;
+  /** Attach instead of launching. */
+  attach?: AttachTarget;
 }
 
 export interface AdapterSpec {
@@ -29,6 +40,10 @@ export interface AdapterSpec {
   adapterID: string;
   env?: NodeJS.ProcessEnv;
   launchArgs: (t: LaunchTarget) => Record<string, unknown>;
+  /** Arguments of the attach request; missing when the adapter cannot attach. */
+  attachArgs?: (a: AttachTarget) => Record<string, unknown>;
+  /** Attach can also go to an adapter the program started itself, listening on a port (AttachTarget.port). */
+  attachByPort?: boolean;
   /** Pause at the start with a function breakpoint here: the adapter's stopOnEntry stops in the loader. */
   entryFunction?: string;
   /** Console lines that are adapter chatter, not program output. */
@@ -152,11 +167,24 @@ function debugpySpec(py: PythonCommand): AdapterSpec {
       subProcess: false,
       showReturnValue: true,
     }),
+    // By process id debugpy injects itself with gdb or lldb. A program started with --listen runs its own
+    // adapter on that port, which FreeCode connects to directly.
+    attachArgs: (a) => ({
+      type: 'python',
+      request: 'attach',
+      name: 'FreeCode',
+      justMyCode: true,
+      showReturnValue: true,
+      redirectOutput: true,
+      ...(a.port !== undefined ? { connect: { host: a.host || '127.0.0.1', port: a.port } } : { processId: a.pid }),
+    }),
+    attachByPort: true,
   };
 }
 
 /** rustc's own lldb formatters, so String and Vec show their contents. */
 function rustFormatters(program: string): string[] {
+  if (!program) return [];
   const dir = path.dirname(program);
   const stem = path.basename(program).replace(/\.exe$/i, '');
   // cargo builds into target/<profile>/; `rustc -g main.rs` leaves the program next to main.rs.
@@ -185,6 +213,7 @@ function lldbSpec(exe: string, program: string): AdapterSpec {
     adapterID: 'lldb-dap',
     entryFunction: 'main',
     launchArgs: (t) => ({ type: 'lldb-dap', request: 'launch', name: 'FreeCode', program: t.program, args: t.args, cwd: t.cwd, stopOnEntry: false, ...(init.length ? { initCommands: init } : {}) }),
+    attachArgs: (a) => ({ type: 'lldb-dap', request: 'attach', name: 'FreeCode', pid: a.pid, ...(a.program ? { program: a.program } : {}), ...(init.length ? { initCommands: init } : {}) }),
   };
 }
 
@@ -198,6 +227,7 @@ function netcoredbgSpec(exe: string): AdapterSpec {
     adapterID: 'coreclr',
     // netcoredbg runs `dotnet <program>` for a .dll.
     launchArgs: (t) => ({ type: 'coreclr', request: 'launch', name: 'FreeCode', program: t.program, args: t.args, cwd: t.cwd, stopAtEntry: t.stopOnEntry, justMyCode: true, console: 'internalConsole' }),
+    attachArgs: (a) => ({ type: 'coreclr', request: 'attach', name: 'FreeCode', processId: a.pid, justMyCode: true }),
   };
 }
 
@@ -238,6 +268,9 @@ function dlvSpec(exe: string, program: string): AdapterSpec {
       stopOnEntry: false,
       ...(fromSource ? { output } : {}),
     }),
+    // On a port: a server started with `dlv --headless --listen=:<port>`, which already runs the program.
+    attachArgs: (a) => ({ type: 'go', request: 'attach', name: 'FreeCode', ...(a.port !== undefined ? { mode: 'remote' } : { mode: 'local', processId: a.pid }) }),
+    attachByPort: true,
   };
 }
 
@@ -288,6 +321,24 @@ export function parseAdapter(value: string | undefined): string | null {
 
 const ADAPTER_KIND: Record<string, DebugKind> = { debugpy: 'python', 'lldb-dap': 'native', netcoredbg: 'csharp', dlv: 'go' };
 
+/** The installed adapter for `kind`, or null. */
+async function adapterFor(kind: DebugKind, program: string): Promise<AdapterSpec | null> {
+  if (kind === 'python') {
+    const py = await findDebugpy();
+    return py ? debugpySpec(py) : null;
+  }
+  if (kind === 'native') {
+    const exe = findLldbDap();
+    return exe ? lldbSpec(exe, program) : null;
+  }
+  if (kind === 'go') {
+    const exe = findDlv();
+    return exe ? dlvSpec(exe, program) : null;
+  }
+  const exe = which('netcoredbg', true);
+  return exe ? netcoredbgSpec(exe) : null;
+}
+
 /** Picks the debugger for `file` (absolute): a DAP adapter, or pdb / node inspect. */
 export async function chooseBackend(file: string, adapter: string): Promise<Backend | { error: string }> {
   const extra = extraAdapters.get(adapter);
@@ -308,24 +359,29 @@ export async function chooseBackend(file: string, adapter: string): Promise<Back
     // The apphost next to a .NET program's .dll is not what netcoredbg runs.
     if (kind === 'csharp' && /\.exe$/i.test(file)) program = dotnetDll(path.dirname(file), path.basename(file, path.extname(file))) ?? file;
   }
-  if (kind === 'python') {
-    const py = await findDebugpy();
-    if (py) return { type: 'dap', spec: debugpySpec(py), program };
-    // Without Python at all, the pdb path reports how to install it.
-    if (!(await findPython())) return { type: 'pdb' };
-    if (adapter === 'debugpy') return { error: installHint('python') };
-    return { type: 'pdb', note: `${installHint('python')} Using pdb until then.` };
+  const spec = await adapterFor(kind, program);
+  if (spec) return { type: 'dap', spec, program };
+  if (kind !== 'python') return { error: installHint(kind) };
+  // Without Python at all, the pdb path reports how to install it.
+  if (!(await findPython())) return { type: 'pdb' };
+  if (adapter === 'debugpy') return { error: installHint('python') };
+  return { type: 'pdb', note: `${installHint('python')} Using pdb until then.` };
+}
+
+/** The adapter that attaches to a running process: the one asked for, or the one for `program`. */
+export async function attachBackend(adapter: string, program: string | undefined): Promise<{ spec: AdapterSpec } | { error: string }> {
+  const extra = extraAdapters.get(adapter);
+  if (extra) return extra.attachArgs ? { spec: extra } : { error: `${extra.name} cannot attach to a process.` };
+  let kind: DebugKind | undefined = ADAPTER_KIND[adapter];
+  if (adapter === 'auto' && program) {
+    const c = classifyProgram(program);
+    if ('error' in c) return c;
+    if (c.kind !== 'node') kind = c.kind;
   }
-  if (kind === 'native') {
-    const exe = findLldbDap();
-    return exe ? { type: 'dap', spec: lldbSpec(exe, program), program } : { error: installHint('native') };
-  }
-  if (kind === 'go') {
-    const exe = findDlv();
-    return exe ? { type: 'dap', spec: dlvSpec(exe, program), program } : { error: installHint('go') };
-  }
-  const exe = which('netcoredbg', true);
-  return exe ? { type: 'dap', spec: netcoredbgSpec(exe), program } : { error: installHint('csharp') };
+  if (!kind) return { error: 'Attaching works with debugpy, lldb-dap, netcoredbg and dlv: set adapter to one of them.' };
+  const spec = await adapterFor(kind, program ?? '');
+  if (spec) return { spec };
+  return { error: kind === 'python' && !(await findPython()) ? PYTHON_MISSING : installHint(kind) };
 }
 
 // ------------------------------------------------------------------ what kind of program
