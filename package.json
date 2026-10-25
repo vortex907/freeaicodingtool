@@ -1,0 +1,55 @@
+{
+  "name": "freecode",
+  "version": "1.6.1",
+  "description": "A free AI coding agent (desktop app + terminal). Pools every free LLM API (Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cerebras, Cohere, Z.ai, Cloudflare, Ollama, ...) behind an AI router with automatic failover.",
+  "type": "module",
+  "bin": {
+    "freecode": "bin/freecode.js",
+    "fcode": "bin/freecode.js"
+  },
+  "files": [
+    "bin",
+    "dist/src",
+    "web",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node bin/freecode.js",
+    "package:win": "node scripts/build-windows.mjs",
+    "icons": "node scripts/make-icons.mjs"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "coding-agent",
+    "llm",
+    "free",
+    "openrouter",
+    "gemini",
+    "groq",
+    "mistral",
+    "ollama",
+    "agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vortex907/freeaicodingtool.git"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.1.0"
+  }
+}
