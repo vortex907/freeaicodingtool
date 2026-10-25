@@ -202,6 +202,7 @@ function main(): void {
         attached = req.command === 'attach';
         if (flags.includes('--fail-launch')) {
           process.stderr.write('fake adapter log: the program could not be loaded\n');
+          await new Promise((r) => setTimeout(r, 50));
           return { error: 'Cannot launch the program: it crashed while loading.' };
         }
         event('output', { category: 'console', output: `fake: ${req.command} ${program}\n` });
@@ -278,6 +279,8 @@ function main(): void {
         const locals = f?.locals ?? {};
         if (a.context === 'repl') {
           if (expr === 'cont') {
+            // Real adapters announce a resume they were not asked for with a continued event.
+            event('continued', { threadId: 1, allThreadsContinued: true });
             setTimeout(() => resume('continue'), 10);
             return { body: { result: 'continuing', variablesReference: 0 } };
           }

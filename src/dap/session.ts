@@ -148,6 +148,8 @@ export class DapSession {
       s.armIdle();
       return { session: s.ended ? null : s, report: { ...report, text: [header, ...s.notes, report.text, missed].filter(Boolean).join('\n') } };
     } catch (e) {
+      // Adapters often explain on stderr while they answer with the error: let that arrive first.
+      await sleep(100);
       const text = s.failure(e as Error);
       await s.dispose();
       return { session: null, report: { text, isError: true } };

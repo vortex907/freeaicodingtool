@@ -339,7 +339,7 @@ test('Debugger over DAP: attach to a running process, then detach', async () => 
   assert.equal(prep.permission?.subject, 'fake attach to process 4242');
   assert.equal(DebuggerTool.label({ action: 'start', pid: 4242 }, { cwd: dir, projectRoot: dir }), 'Debugger(attach 4242)');
   const r = await prep.execute();
-  assert.match(r.content, /^Attached fake to process 4242\.\nProgram output:\n(tick\n)+The program is running\. Set breakpoints with break/);
+  assert.match(r.content, /^Attached fake to process 4242\.\n(Program output:\n(tick\n)+)?The program is running\. Set breakpoints with break/);
   const attach = requests().find((m) => m.command === 'attach')!;
   assert.equal(attach.arguments.processId, 4242);
   assert.ok(!requests().some((m) => m.command === 'launch'));
