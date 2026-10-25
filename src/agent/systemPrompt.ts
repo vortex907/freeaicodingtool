@@ -11,6 +11,9 @@ import { DEFAULT_IGNORED_DIRS } from '../tools/listFiles.js';
 /** The CodeSearch line of the tool rules (left out when the code index is turned off). */
 export const CODE_SEARCH_RULE = '- For questions like "where is X handled" or "how does A use B", use CodeSearch first, then Read the hits.';
 
+/** The LSP line of the tool rules (left out when language servers are turned off). */
+export const LSP_RULE = '- Edit and Write results list the errors the language server finds: fix the ones you caused. Use LSP for definitions, references, types, renames and diagnostics.';
+
 export const CORE_PROMPT = `You are FreeCode, an AI coding agent working on the user's own computer (in the FreeCode app or a terminal). You build, fix, refactor and explain software, run builds and tests, and use git. You act through your tools; the user sees your tool calls and their results.
 
 # How to work (follow these steps every time)
@@ -55,6 +58,7 @@ Your training data is out of date. For anything that can change over time (lates
 - Use Glob/Grep/LS instead of find/grep/ls, and Read instead of cat/head/tail.
 - Read also shows images (PNG, JPEG, GIF, WebP) to models that can see them and returns PDF text page by page (pages="3-5" for long PDFs).
 ${CODE_SEARCH_RULE}
+${LSP_RULE}
 - Make independent tool calls together in one reply (for example reading several files).
 - Bash commands must not be interactive. Start servers, watchers and GUI apps with run_in_background=true; BashOutput without bash_id lists them with the ports they listen on. Quote paths that contain spaces.
 - Use REPL (Python or Node) for quick experiments, inspecting data and keeping state between steps; use Bash for scripts and builds.
@@ -104,6 +108,8 @@ export interface PromptContext {
   indexSection?: string;
   /** False when the code index is turned off (no CodeSearch tool). */
   codeSearch?: boolean;
+  /** False when language servers are turned off (no LSP tool). */
+  lsp?: boolean;
   extraSections?: string[];
   /** Name/key of the model that will receive the prompt (optional). */
   modelName?: string;
@@ -132,7 +138,8 @@ export async function environmentSection(projectRoot: string, cwd: string): Prom
 }
 
 export function buildSystemPrompt(ctx: PromptContext, envSection: string): string {
-  const core = ctx.codeSearch === false ? CORE_PROMPT.replace(`${CODE_SEARCH_RULE}\n`, '') : CORE_PROMPT;
+  let core = ctx.codeSearch === false ? CORE_PROMPT.replace(`${CODE_SEARCH_RULE}\n`, '') : CORE_PROMPT;
+  if (ctx.lsp === false) core = core.replace(`${LSP_RULE}\n`, '');
   const parts: string[] = [ctx.depth > 0 ? `${SUBAGENT_PROMPT}\n\n${core.split('# Communication')[0]!.trim()}` : core];
   if (ctx.mode === 'plan' && ctx.depth === 0) parts.push(PLAN_MODE_PROMPT);
   parts.push(envSection);

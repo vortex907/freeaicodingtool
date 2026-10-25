@@ -11,6 +11,7 @@ import { pageRangeText, readPdf } from './pdf.js';
 import { saveScreenshot } from '../browser/browser.js';
 import { displayPath, formatBytes, isBinaryBuffer } from '../util/fs.js';
 import { fuzzyScore } from '../util/strings.js';
+import { warmUpLanguageServer } from '../lsp/index.js';
 
 const MAX_READ_BYTES = 20 * 1024 * 1024;
 const DEFAULT_READ_LINES = 2000;
@@ -194,6 +195,8 @@ export const ReadTool: Tool = {
         if (ext === '.ipynb') text = renderNotebook(text);
         ctx.files.recordRead(abs);
         ctx.files.recordView(abs, range, seq);
+        // Files are read before they are edited: start the language server now so the edit is checked at once.
+        warmUpLanguageServer(abs, ctx.projectRoot, (req) => ctx.services.permit?.(req).action === 'allow');
         if (!text.length) return ok(`<system-note>The file ${abs} exists but is empty.</system-note>`, { kind: 'summary', text: 'Read 0 lines (empty file)' });
         const allLines = text.split(/\r?\n/);
         if (allLines.length > 1 && allLines[allLines.length - 1] === '') allLines.pop();

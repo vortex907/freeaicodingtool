@@ -47,7 +47,7 @@ export function ruleMatches(rule: string, req: PermissionRequest, projectRoot: s
     r.tool === '*' ||
     r.tool === tool ||
     // Edit rules cover all file-modifying tools
-    (r.tool === 'Edit' && (tool === 'Write' || tool === 'MultiEdit' || tool === 'NotebookEdit')) ||
+    (r.tool === 'Edit' && (tool === 'Write' || tool === 'MultiEdit' || tool === 'NotebookEdit' || (tool === 'LSP' && req.category === 'edit'))) ||
     // Bash rules also cover TestRun, which runs a command line too
     (r.tool === 'Bash' && tool === 'TestRun') ||
     (r.tool.startsWith('mcp__') && tool.startsWith(r.tool + '__')) ||
@@ -86,7 +86,10 @@ export interface PermissionContext {
 /** Decides what to do with a tool call that requested permission. */
 export function decide(req: PermissionRequest, ctx: PermissionContext): Decision {
   const root = ctx.projectRoot;
-  for (const rule of ctx.deny) if (ruleMatches(rule, req, root)) return { action: 'deny', reason: `blocked by rule ${rule}` };
+  // A multi-file edit is judged file by file: one denied file denies it, every file needs an allow.
+  const each = req.paths?.length ? req.paths.map((p) => ({ ...req, path: p })) : [req];
+  const anyMatch = (rule: string) => each.some((r) => ruleMatches(rule, r, root));
+  for (const rule of ctx.deny) if (anyMatch(rule)) return { action: 'deny', reason: `blocked by rule ${rule}` };
 
   const danger = req.command ? dangerousCommandReason(req.command) : null;
   const finalize = (d: Decision): Decision => (d.action === 'ask' && !ctx.interactive ? { action: 'deny', reason: d.reason ?? 'needs approval (non-interactive run)' } : d);
@@ -109,11 +112,13 @@ export function decide(req: PermissionRequest, ctx: PermissionContext): Decision
     return finalize({ action: 'ask', reason: `this command ${danger}` });
   }
 
-  for (const rule of ctx.ask) if (ruleMatches(rule, req, root)) return finalize({ action: 'ask', reason: `rule ${rule}` });
+  for (const rule of ctx.ask) if (anyMatch(rule)) return finalize({ action: 'ask', reason: `rule ${rule}` });
 
   if (ctx.mode === 'bypassPermissions') return { action: 'allow' };
 
-  for (const rule of [...ctx.allow, ...ctx.sessionAllow]) if (ruleMatches(rule, req, root)) return { action: 'allow', reason: `rule ${rule}` };
+  const allowRules = [...ctx.allow, ...ctx.sessionAllow];
+  const allowedBy = each.map((r) => allowRules.find((rule) => ruleMatches(rule, r, root)));
+  if (allowedBy.every(Boolean)) return { action: 'allow', reason: `rule ${allowedBy[0]}` };
 
   switch (req.category) {
     case 'read':
@@ -123,7 +128,7 @@ export function decide(req: PermissionRequest, ctx: PermissionContext): Decision
       if (req.tool === 'WebSearch' || req.readOnly) return { action: 'allow' };
       return finalize({ action: 'ask' });
     case 'edit': {
-      const inside = !!req.path && (isInside(req.path, root) || ctx.additionalDirectories.some((d) => isInside(req.path!, path.resolve(d))));
+      const inside = each.every((r) => !!r.path && (isInside(r.path, root) || ctx.additionalDirectories.some((d) => isInside(r.path!, path.resolve(d)))));
       if (ctx.mode === 'acceptEdits' && inside) return { action: 'allow' };
       return finalize({ action: 'ask', reason: inside ? undefined : 'the file is outside the project' });
     }

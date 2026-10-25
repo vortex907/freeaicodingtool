@@ -15,6 +15,8 @@ import { DebuggerTool } from './debugger.js';
 import { isWindows } from '../util/platform.js';
 import { CodeSearchTool } from './codeSearch.js';
 import { isCodeIndexEnabled } from '../codeindex/index.js';
+import { LspTool } from './lspTool.js';
+import { isLspEnabled } from '../lsp/index.js';
 
 export const BUILTIN_TOOLS: Tool[] = [
   ReadTool,
@@ -32,6 +34,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   GrepTool,
   LSTool,
   CodeSearchTool,
+  LspTool,
   WebFetchTool,
   WebSearchTool,
   BrowserTool,
@@ -61,7 +64,8 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   let tools = [...BUILTIN_TOOLS, ...(opts.extra ?? [])];
   if (opts.depth > 0) {
     const explore = opts.agentType === 'explore';
-    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'CodeSearch', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'TodoWrite', 'TestRun', 'REPL', 'Debugger'])]);
+    // LSP refuses rename below the main agent, so sub-agents only get its read actions.
+    const allowed = new Set(['Read', 'Glob', 'Grep', 'LS', 'CodeSearch', 'LSP', 'WebFetch', 'WebSearch', 'Bash', 'BashOutput', 'Browser', ...(explore ? [] : ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'TodoWrite', 'TestRun', 'REPL', 'Debugger'])]);
     tools = tools.filter((t) => allowed.has(t.name) || t.category === 'mcp');
   } else {
     if (!opts.planMode) tools = tools.filter((t) => t.name !== 'ExitPlanMode');
@@ -70,6 +74,7 @@ export function selectTools(opts: ToolSetOptions): Tool[] {
   if (!opts.hasSkills) tools = tools.filter((t) => t.name !== 'Skill');
   if (!isWindows) tools = tools.filter((t) => t.name !== 'Desktop');
   if (!isCodeIndexEnabled()) tools = tools.filter((t) => t.name !== 'CodeSearch');
+  if (!isLspEnabled()) tools = tools.filter((t) => t.name !== 'LSP');
   if (opts.disallowed?.length) {
     const deny = new Set(opts.disallowed.map((d) => d.replace(/\(.*$/, '')));
     tools = tools.filter((t) => !deny.has(t.name));

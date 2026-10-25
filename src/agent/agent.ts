@@ -1,5 +1,4 @@
 // The agent loop: send conversation -> stream the answer -> run requested tools -> repeat until done.
-import * as path from 'node:path';
 import type { ChatMessage, ImageAttachment, ToolCall, Usage } from '../providers/types.js';
 import { requestCost } from '../providers/cost.js';
 import type { PermissionMode, Settings } from '../config/config.js';
@@ -21,6 +20,8 @@ import { runHooks } from './hooks.js';
 import { plainPunctuation } from '../shared/punctuation.js';
 import { previewAfterEdit } from '../tools/browserTool.js';
 import { checkSyntax } from '../tools/syntaxCheck.js';
+import { diagnosticsAfterEdit } from '../lsp/index.js';
+import { resolvePath } from '../tools/listFiles.js';
 import { strParam } from '../tools/types.js';
 import type { McpManager } from '../mcp/manager.js';
 import { debug } from '../util/log.js';
@@ -412,6 +413,11 @@ export class Agent {
 
   // ------------------------------------------------------------------ tools
 
+  /** The permission rules and mode applied to a request, without asking anyone. */
+  private permit(req: PermissionRequest): ReturnType<typeof decide> {
+    return decide(req, { ...this.opts.permissions, mode: this.opts.session.permissionMode });
+  }
+
   private toolContext(signal: AbortSignal, toolCallId: string): ToolContext {
     const services: ToolServices = {
       progress: (text) => this.emit({ type: 'tool_progress', id: toolCallId, text }),
@@ -419,6 +425,7 @@ export class Agent {
       approvePlan: this.opts.ui.approvePlan,
       runSubagent: this.depth === 0 ? (req) => this.runSubagent(req.description, req.prompt, req.agentType, req.signal) : undefined,
       summarize: (text, instruction, sig) => this.summarizeText(text, instruction, sig),
+      permit: (req) => this.permit(req),
     };
     return {
       projectRoot: this.opts.projectRoot,
@@ -458,16 +465,20 @@ export class Agent {
       if (batch.length > 1) await Promise.all(batch.map(run));
       else await run(batch[0]!);
     }
-    // UI files changed while a Browser page is open: reload it and tell the model what broke.
-    const edits = calls.filter((c) => /^(Write|Edit|MultiEdit)$/.test(c.name) && results.get(c.id) && !results.get(c.id)!.isError);
+    // Changed files are checked at once (syntax, language server); an open Browser page is reloaded.
+    const edits = calls.filter((c) => /^(Write|Edit|MultiEdit)$/.test(findTool(tools, c.name)?.name ?? '') && results.get(c.id) && !results.get(c.id)!.isError);
     if (edits.length && !signal.aborted) {
       const paths = edits.map((c) => strParam(parseToolArguments(c.arguments).value, 'file_path', 'path', 'filePath') ?? '');
+      const files = paths.map((p) => (p ? resolvePath(p, this.opts.session.cwd) : ''));
       // A broken edit is cheapest to fix right away, while the model still has the change in mind.
-      const checks = await Promise.all(paths.map((p) => (p ? checkSyntax(path.resolve(this.opts.session.cwd, p), this.opts.projectRoot) : null)));
+      // The language server check runs alongside; a missing or slow server just means no report, and one
+      // that would run the project's code is only started when the permission rules allow it.
+      const mayStart = (req: PermissionRequest) => this.permit(req).action === 'allow';
+      const [checks, diagnostics] = await Promise.all([Promise.all(files.map((f) => (f ? checkSyntax(f, this.opts.projectRoot) : null))), diagnosticsAfterEdit(files, this.opts.projectRoot, signal, mayStart)]);
       checks.forEach((problem, i) => {
-        if (!problem) return;
         const r = results.get(edits[i]!.id)!;
-        results.set(edits[i]!.id, { ...r, content: `${r.content}\n\nSyntax check failed after this edit:\n${problem}\nFix this before doing anything else.` });
+        if (problem) results.set(edits[i]!.id, { ...r, content: `${r.content}\n\nSyntax check failed after this edit:\n${problem}\nFix this before doing anything else.` });
+        else if (diagnostics[i]) results.set(edits[i]!.id, { ...r, content: `${r.content}\n\n${diagnostics[i]}` });
       });
       const note = await previewAfterEdit(this.opts.session, paths);
       if (note) {
