@@ -88,7 +88,7 @@ async function waitFor(check: () => boolean, ms = 5000): Promise<void> {
 // ------------------------------------------------------------------ protocol
 
 test('DAP framing: messages split at any byte, with text around them and multi-byte characters', () => {
-  const a = { seq: 1, type: 'event', event: 'output', body: { output: 'grüße ✓ 你好\n' } };
+  const a = { seq: 1, type: 'event', event: 'output', body: { output: 'grüße € 你好\n' } };
   const b = { seq: 2, type: 'response', request_seq: 1, success: true, command: 'threads', body: { threads: [] } };
   const wire = Buffer.concat([Buffer.from('adapter says hi\n'), encodeMessage(a), encodeMessage(b)]);
   assert.match(encodeMessage(a).toString('latin1'), new RegExp(`^Content-Length: ${Buffer.byteLength(JSON.stringify(a))}\\r\\n\\r\\n`));
